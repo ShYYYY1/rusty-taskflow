@@ -19,23 +19,20 @@ impl FromAnyVec for () {
 
 macro_rules! impl_from_any_vec {
     ($($idx:tt : $T:ident),+) => {
-        impl<$($T: Send + Sync + Clone + 'static),+> FromAnyVec for ($($T,)+) {
+        impl<$($T: Send + Sync + 'static),+> FromAnyVec for ($(Arc<$T>,)+) {
             fn from_any_vec(mut inputs: Vec<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError> {
                 const ARITY: usize = impl_from_any_vec!(@count $($T),+);
                 if inputs.len() != ARITY {
                     return Err(FlowError::TaskInputsNumError(ARITY, inputs.len()));
                 }
-                // avoid copying
                 inputs.reverse();
-                Ok(($(
-                    {
+                Ok(($({
                         let arc = inputs.pop().unwrap();
-                        let typed = arc.downcast::<$T>()
+                        arc.downcast::<$T>()
                             .map_err(|_| {
                                 FlowError::TaskInputTypeDowncastError(
                                     format!("input[{}]: downcast to {} failed", $idx, std::any::type_name::<$T>()))
-                            })?;
-                        Arc::try_unwrap(typed).unwrap_or_else(|arc| (*arc).clone())
+                            })?
                     },
                 )+))
             }

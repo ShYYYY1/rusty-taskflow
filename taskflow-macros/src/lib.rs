@@ -166,6 +166,10 @@ fn parse_signature(run_fn: &ImplItemFn) -> syn::Result<(ReceiverKind, Vec<ArgInf
                 };
 
                 let ident = pat_ident.ident.clone();
+                // 输入参数现在是 Arc<T>，根据用户签名中的参数形式生成对应的调用表达式：
+                // &T     → &*arc（零开销解引用）
+                // &mut T → Arc::make_mut（仅在多引用时 clone）
+                // T      → Arc::try_unwrap（仅在多引用时 clone）
                 match typed.ty.as_ref() {
                     Type::Reference(r) => {
                         let inner = (*r.elem).clone();
@@ -173,14 +177,14 @@ fn parse_signature(run_fn: &ImplItemFn) -> syn::Result<(ReceiverKind, Vec<ArgInf
                             args.push(ArgInfo {
                                 binding: ident.clone(),
                                 input_ty: inner,
-                                call_expr: quote! { &mut #ident },
+                                call_expr: quote! { std::sync::Arc::make_mut(&mut #ident) },
                                 needs_mut_binding: true,
                             });
                         } else {
                             args.push(ArgInfo {
                                 binding: ident.clone(),
                                 input_ty: inner,
-                                call_expr: quote! { &#ident },
+                                call_expr: quote! { &*#ident },
                                 needs_mut_binding: false,
                             });
                         }
@@ -189,7 +193,9 @@ fn parse_signature(run_fn: &ImplItemFn) -> syn::Result<(ReceiverKind, Vec<ArgInf
                         args.push(ArgInfo {
                             binding: ident.clone(),
                             input_ty: other_ty.clone(),
-                            call_expr: quote! { #ident },
+                            call_expr: quote! {
+                                std::sync::Arc::try_unwrap(#ident).unwrap_or_else(|arc| (*arc).clone())
+                            },
                             needs_mut_binding: false,
                         });
                     }
@@ -205,9 +211,12 @@ fn build_input_type(args: &[ArgInfo]) -> proc_macro2::TokenStream {
     match args {
         [] => quote! { () },
         _ => {
-            // 统一生成元组: 1 个参数 → (u8,)，2 个 → (u8, String,)
-            // 尾逗号确保 1-tuple 语法正确，且与 FromAnyVec 的 impl 一致
-            let tys = args.iter().map(|arg| &arg.input_ty);
+            // 每个参数类型包装为 Arc<T>，与 FromAnyVec 的 (Arc<A>, Arc<B>, ...) 实现一致
+            // 尾逗号确保 1-tuple 语法正确
+            let tys = args.iter().map(|arg| {
+                let ty = &arg.input_ty;
+                quote! { std::sync::Arc<#ty> }
+            });
             quote! { ( #(#tys,)* ) }
         }
     }

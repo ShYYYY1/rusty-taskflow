@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use crate::tf::{flow::{Flow, TaskId}, traits::IntoDependencies};
 
@@ -17,7 +17,7 @@ impl IntoDependencies<()> for () {
     fn register(self, _flow: &mut Flow, _target: &TaskId) {}
 }
 
-impl<A> IntoDependencies<(A,)> for OutputWrapper<A> {
+impl<A> IntoDependencies<(Arc<A>,)> for OutputWrapper<A> {
     fn register(self, flow: &mut Flow, target: &TaskId) {
         flow.add_edges(self.id, target.clone());
     }
@@ -25,7 +25,7 @@ impl<A> IntoDependencies<(A,)> for OutputWrapper<A> {
 
 macro_rules! impl_into_dependencies {
     ($($idx:tt : $T:ident),+) => {
-        impl<$($T),+> IntoDependencies<($($T,)+)> for ($(OutputWrapper<$T>),+) {
+        impl<$($T),+> IntoDependencies<($(Arc<$T>,)+)> for ($(OutputWrapper<$T>),+) {
             fn register(self, flow: &mut Flow, target: &TaskId) {
                 $(flow.add_edges(self.$idx.id, target.clone());)+
             }
