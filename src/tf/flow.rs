@@ -8,8 +8,13 @@ pub struct TaskId(pub usize);
 #[derive(Clone)]
 struct InDegree(u8);
 
+// todo complete meta datas
 struct TaskMeta {
     pub name: String,
+}
+
+pub struct FlowContext {
+// todo implement FlowContext for managing the flow's state and context
 }
 
 pub struct Flow {

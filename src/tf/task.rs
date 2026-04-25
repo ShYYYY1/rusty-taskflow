@@ -44,6 +44,7 @@ macro_rules! impl_from_any_vec {
     (@replace $_t:ident $val:expr) => { $val };
 }
 
+// impl_from_any_vec! macro for generating FromAnyVec implementations for tuples, vector of 6 elements top supported
 impl_from_any_vec!(0: A);
 impl_from_any_vec!(0: A, 1: B);
 impl_from_any_vec!(0: A, 1: B, 2: C);
@@ -52,35 +53,30 @@ impl_from_any_vec!(0: A, 1: B, 2: C, 3: D, 4: E);
 impl_from_any_vec!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 
 pub struct TaskAdapter<I, O, T>
-    where 
-        T: AsyncTask<Input = I, Output = O>,
-        I: Send + Sync + 'static,
-        O: Send + Sync + 'static
+where 
+    T: AsyncTask<Input = I, Output = O>,
+    I: Send + Sync + 'static,
+    O: Send + Sync + 'static
 {
     task: T,
-    // phantom: PhantomData<I>
 }
 
 impl<I, O, T> TaskAdapter<I, O, T>
-    where 
-        T: AsyncTask<Input = I, Output = O>,
-        I: Send + Sync + 'static,
-        O: Send + Sync + 'static
+where 
+    T: AsyncTask<Input = I, Output = O>,
+    I: Send + Sync + 'static,
+    O: Send + Sync + 'static
 {
     pub fn new(task: T) -> Self {
         Self { task: task }
     }
-
-    fn invoke(self, input: I) -> Pin<Box<impl Future<Output = TaskOutput<O>>>> {
-        Box::pin(self.task.run(TaskInput(input)))
-    }
 }
 
 impl<I, O, T> InvocableTask for TaskAdapter<I, O, T>
-    where 
-        T: AsyncTask<Input = I, Output = O> + Send + 'static,
-        I: FromAnyVec,
-        O: Send + Sync + 'static
+where 
+    T: AsyncTask<Input = I, Output = O> + Send + 'static,
+    I: FromAnyVec,
+    O: Send + Sync + 'static
 {
     fn invoke(self: Box<Self>, input: Inputs) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Any + Send + Sync>, String>> + Send>> {
         let input_tup = match I::from_any_vec(input) {
