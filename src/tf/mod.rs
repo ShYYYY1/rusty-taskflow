@@ -7,3 +7,6 @@ pub mod errors;
 pub mod traits;
 
 pub mod dependency;
+
+#[cfg(test)]
+mod bench;
