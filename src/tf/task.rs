@@ -2,8 +2,8 @@ use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use crate::tf::{errors::FlowError, traits::{AsyncTask, FromAnyVec, InvocableTask}};
 
-pub struct TaskInput<T = ()>(pub T);
-pub struct TaskOutput<T = ()>(pub T);
+pub(crate) struct TaskInput<T = ()>(pub(crate) T);
+pub(crate) struct TaskOutput<T = ()>(pub(crate) T);
 
 type Inputs = Vec<Arc<dyn Any + Send + Sync>>;
 
@@ -25,6 +25,7 @@ macro_rules! impl_from_any_vec {
                 if inputs.len() != ARITY {
                     return Err(FlowError::TaskInputsNumError(ARITY, inputs.len()));
                 }
+                // avoid copying
                 inputs.reverse();
                 Ok(($(
                     {

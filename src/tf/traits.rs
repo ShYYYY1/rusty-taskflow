@@ -6,13 +6,13 @@ pub trait FromAnyVec: Sized + Send + Sync + 'static {
 }
 
 pub trait SyncTask {
-    type Input: Send;
+    type Input: Send + Sync + 'static;
     type Output;
     fn run(self, input: TaskInput<Self::Input>) -> TaskOutput<Self::Output>;
 }
 
 pub trait AsyncTask {
-    type Input;
+    type Input: Send + Sync + 'static;
     type Output;
     fn run(self, input: TaskInput<Self::Input>) -> impl Future<Output = TaskOutput<Self::Output>> + Send;
 }
