@@ -3,7 +3,7 @@ use std::{any::Any, collections::{HashMap, VecDeque}, marker::PhantomData, sync:
 use crate::tf::{dependency::{DependencyBuilder, OutputWrapper}, errors::{FlowError, TaskError}, task::TaskAdapter, traits::{AsyncTask, FromAnyVec, InvocableTask}};
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-pub(crate) struct TaskId(pub usize);
+pub struct TaskId(pub usize);
 
 #[derive(Clone)]
 struct InDegree(u8);
@@ -35,7 +35,7 @@ impl Flow {
         &'flow mut self,
         name: impl Into<String>,
         task: impl AsyncTask<Input = I, Output = O> + Send + 'static
-    ) -> DependencyBuilder<I, O>
+    ) -> DependencyBuilder<'flow, I, O>
     where
         I: FromAnyVec,
         O: Send + Sync + 'static
@@ -71,11 +71,6 @@ impl Flow {
         self.indegrees.entry(to).or_insert(InDegree(0)).0 += 1;
     }
 
-    /// 分层并发执行 DAG，使用 outputs 仓库传递 task 之间的数据
-    ///
-    /// - source task (indegree=0, 无上游依赖): 用 `Arc::new(())` 作为输入
-    /// - 有依赖的 task: 从 outputs 仓库取上游 task 的输出作为输入
-    /// - `sink` 参数标识终点 task，其输出会被类型化返回
     pub async fn run<'flow, Output: Send + Sync + 'static>(
         &'flow mut self,
         sink: OutputWrapper<Output>,
@@ -87,11 +82,9 @@ impl Flow {
             let mut handles = Vec::new();
 
             for task_id in &layer {
-                // 从 tasks map 中取出 task (消费所有权)
                 let task = self.tasks.remove(task_id)
                     .ok_or(FlowError::TaskNotFound(task_id.0))?;
 
-                // 解析输入: 有上游依赖 -> 取 outputs; 无依赖 -> Arc::new(())
                 let input: Vec<Arc<dyn Any + Send + Sync>> = match self.rev_edges.get(task_id) {
                     Some(deps) if !deps.is_empty() => {
                         deps.iter().filter_map(|id| {
@@ -99,7 +92,6 @@ impl Flow {
                         }).collect()
                     }
                     _ => {
-                        // source task: 无输入依赖，传入 ()
                         Vec::new()
                     }
                 };
@@ -109,7 +101,6 @@ impl Flow {
                 handles.push((tid, tokio::spawn(fut)));
             }
 
-            // 等待当前层所有 task 完成，收集输出到 outputs 仓库
             for (tid, handle) in handles {
                 let result = handle.await
                     .map_err(|e| FlowError::TaskExecutionError(
@@ -122,7 +113,6 @@ impl Flow {
             }
         }
 
-        // 从 outputs 中取出 sink task 的输出，downcast 到具体类型
         let final_arc = outputs.remove(&sink.id)
             .ok_or_else(|| FlowError::TaskNotFound(sink.id.clone().0))?;
         let typed_arc = final_arc.downcast::<Output>()
@@ -137,7 +127,6 @@ impl Flow {
 
     fn get_topological_layers(&self) -> Result<Vec<Vec<TaskId>>, FlowError> {
         let mut tmp_indegree = self.indegrees.clone();
-        // indegree = 0 的节点进入初始队列 (source tasks)
         let mut queue: VecDeque<TaskId> = tmp_indegree
             .iter()
             .filter(|(_, indegree)| indegree.0 == 0)
@@ -149,7 +138,6 @@ impl Flow {
             let cur_layer: Vec<TaskId> = queue.drain(..).collect();
             for t in &cur_layer {
                 visited += 1;
-                // 叶子节点可能没有出边，用空 slice 兜底
                 if let Some(successors) = self.edges.get(t) {
                     for succ in successors {
                         let deg = tmp_indegree.get_mut(succ).unwrap();
@@ -179,13 +167,21 @@ impl Flow {
 #[cfg(test)]
 mod test {
 
-    use taskflow_macros::sync_task;
+    use taskflow_macros::{async_task, sync_task};
 
     use super::*;
 
-    struct StartData(u8);
+    struct StartData1(u8);
     #[sync_task]
-    impl StartData {
+    impl StartData1 {
+        fn run(self) -> u8 {
+            self.0
+        }
+    }
+
+    struct StartData2(u8);
+    #[sync_task]
+    impl StartData2 {
         fn run(self) -> u8 {
             self.0
         }
@@ -200,12 +196,13 @@ mod test {
     struct AddAndPrint;
     #[sync_task]
     impl AddAndPrint {
-        fn run(self, data: u8) -> AddAndPrintOutput {
-            println!("data: {}", data + 10);
-            AddAndPrintOutput { data: data + 10, message: "this is AddAndPrint".to_string() }
+        fn run(self, data1: u8, data2: u8) -> AddAndPrintOutput {
+            println!("data: {}", data1 + data2);
+            AddAndPrintOutput { data: data1 + data2, message: "this is AddAndPrint".to_string() }
         }
     }
 
+    #[derive(Clone)]
     struct MultiplyAndPrintOutput(u8);
 
     struct MultiplyAndPrint {
@@ -224,18 +221,53 @@ mod test {
         }
     }
 
+    struct GenerateThreeValue;
+    #[derive(Clone)]
+    struct GenerateThreeValueOutput(u8, u8, u8);
+    #[sync_task]
+    impl GenerateThreeValue {
+        fn run(self) -> GenerateThreeValueOutput {
+            GenerateThreeValueOutput(10, 20, 30)
+        }
+    }
+
+    struct AddThree;
+
+    #[async_task]
+    impl AddThree {
+        async fn run(self, a: GenerateThreeValueOutput) -> u8 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            a.0 + a.1 + a.2
+        }
+    }
+
+    struct FinalTask;
+
+    #[async_task]
+    impl FinalTask {
+        async fn run(self, a: MultiplyAndPrintOutput, b: u8) -> u8 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            println!("Final result: pipeline1: {}, pipeline2: {}", a.0, b);
+            a.0 + b
+        }
+    }
+
     #[tokio::test]
     async fn test_flow_run() {
         let mut flow = Flow::new();
-        // source task: 无输入，输出 u8
-        let start = flow.commit_source_task("StartTask", StartData(10));
-        // 中间 task: 输入 u8，输出 AddAndPrintOutput
-        let second = flow.commit_task("AddAndPrint", AddAndPrint).with_dependency(start);
-        // sink task: 输入 AddAndPrintOutput，输出 MultiplyAndPrintOutput
-        let third = flow.commit_task("MultiplyAndPrint", MultiplyAndPrint::new()).with_dependency(second);
+        // pipeline1
+        let start1 = flow.commit_source_task("StartTask1", StartData1(10));
+        let start2 = flow.commit_source_task("StartTask2", StartData2(21));
+        let line1_second = flow.commit_task("AddAndPrint", AddAndPrint).with_dependencies((start1, start2));
+        let line1_final = flow.commit_task("MultiplyAndPrint", MultiplyAndPrint::new()).with_dependencies(line1_second);
 
-        let result = flow.run(third).await.unwrap();
-        // StartData(10) -> 10 -> AddAndPrint: 10+10=20 -> MultiplyAndPrint: 2*20=40
-        assert_eq!(result.0, 40);
+        // pipeline2
+        let generate_three = flow.commit_source_task("GenerateThreeValue", GenerateThreeValue);
+        let line2_final = flow.commit_task("AddThree", AddThree).with_dependencies(generate_three);
+
+        let final_task = flow.commit_task("FinalTask", FinalTask).with_dependencies((line1_final, line2_final));
+        let result = flow.run(final_task).await.unwrap();
+        
+        assert_eq!(result, 122);
     }
 }

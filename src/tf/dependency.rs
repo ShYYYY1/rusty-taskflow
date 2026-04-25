@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use crate::tf::{flow::{Flow, TaskId}, traits::IntoDependencies};
 
 pub struct OutputWrapper<O> {
-    pub(crate) id: TaskId,
+    pub id: TaskId,
     phantom: PhantomData<O>
 }
 
@@ -34,10 +34,14 @@ macro_rules! impl_into_dependencies {
 }
 
 impl_into_dependencies!(0:A, 1:B);
+impl_into_dependencies!(0:A, 1:B, 2:C);
+impl_into_dependencies!(0:A, 1:B, 2:C, 3:D);
+impl_into_dependencies!(0:A, 1:B, 2:C, 3:D, 4:E);
+impl_into_dependencies!(0:A, 1:B, 2:C, 3:D, 4:E, 5:F);
 
 pub struct DependencyBuilder<'flow, I, O> {
-    pub(crate) id: TaskId,
-    pub(crate) flow: &'flow mut Flow,
+    pub id: TaskId,
+    pub flow: &'flow mut Flow,
     phantom_in: PhantomData<I>,
     phantom_out: PhantomData<O>,
 }
@@ -47,7 +51,7 @@ impl<'flow, I, O> DependencyBuilder<'flow, I, O> {
         DependencyBuilder { id, flow: f, phantom_in: PhantomData, phantom_out: PhantomData }
     }
 
-    pub fn with_dependency(self, deps: impl IntoDependencies<I>) -> OutputWrapper<O> {
+    pub fn with_dependencies(self, deps: impl IntoDependencies<I>) -> OutputWrapper<O> {
         deps.register(self.flow, &self.id);
         OutputWrapper { id: self.id, phantom: PhantomData }
     }
