@@ -1,4 +1,4 @@
 # rusty-taskflow
-framework to run tasks
+DAG implementation to run tasks concurrently
 
-still developing
+still developing~
