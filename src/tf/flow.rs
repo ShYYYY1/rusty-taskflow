@@ -1,4 +1,4 @@
-use std::{any::Any, collections::{HashMap, VecDeque}, marker::PhantomData, sync::Arc};
+use std::{any::Any, collections::{HashMap, VecDeque}, sync::Arc};
 
 use crate::tf::{dependency::{DependencyBuilder, OutputWrapper}, errors::{FlowError, TaskError}, task::TaskAdapter, traits::{AsyncTask, FromAnyVec, InvocableTask}};
 
@@ -85,6 +85,22 @@ impl Flow {
 
         for layer in layers {
             let mut handles = Vec::new();
+            if layer.len() == 1 { // avoid overhead of tokio runtime scheduling
+                let task_id = &layer[0];
+                let task = self.tasks.remove(task_id).ok_or_else(|| FlowError::TaskNotFound(task_id.0))?;
+                if let Some(dep) = self.rev_edges.get(task_id) {
+                    let inputs: Vec<Arc<dyn Any + Send + Sync>> = dep.iter().filter_map(
+                            |v| {
+                                outputs.get(v).cloned()
+                            }
+                        ).collect();
+                    // inlined execution
+                    if let Ok(output) = task.invoke(inputs).await {
+                        outputs.insert(task_id.clone(), output);
+                    }
+                }
+                continue;
+            }
 
             for task_id in &layer {
                 let task = self.tasks.remove(task_id)

@@ -2,12 +2,11 @@ use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
 use crate::tf::{errors::FlowError, traits::{AsyncTask, FromAnyVec, InvocableTask}};
 
-pub(crate) struct TaskInput<T = ()>(pub(crate) T);
-pub(crate) struct TaskOutput<T = ()>(pub(crate) T);
+pub struct TaskInput<T = ()>(pub(crate) T);
+pub struct TaskOutput<T = ()>(pub(crate) T);
 
 type Inputs = Vec<Arc<dyn Any + Send + Sync>>;
 
-// 0-tuple: source task
 impl FromAnyVec for () {
     fn from_any_vec(inputs: Vec<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError> {
         if !inputs.is_empty() {
