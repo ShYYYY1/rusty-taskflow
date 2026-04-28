@@ -11,6 +11,10 @@ impl<O> OutputWrapper<O> {
     pub(crate) fn new(id: TaskId) -> Self {
         Self { id: id, phantom: PhantomData }
     }
+
+    pub fn dup(&self) -> Self {
+        Self::new(self.id.clone())
+    }
 }
 
 impl IntoDependencies<()> for () {

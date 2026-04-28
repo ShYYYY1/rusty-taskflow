@@ -18,7 +18,7 @@ pub struct FlowContext {
 }
 
 pub struct Flow {
-    tasks: HashMap<TaskId, Box<dyn InvocableTask>>,
+    tasks: Vec<Option<Box<dyn InvocableTask>>>,
     edges: HashMap<TaskId, Vec<TaskId>>,
     rev_edges: HashMap<TaskId, Vec<TaskId>>,
     indegrees: HashMap<TaskId, InDegree>,
@@ -28,7 +28,7 @@ pub struct Flow {
 impl Flow {
     pub fn new() -> Self {
         Self {
-            tasks: HashMap::new(),
+            tasks: Vec::new(),
             edges: HashMap::new(),
             rev_edges: HashMap::new(),
             indegrees: HashMap::new(),
@@ -48,7 +48,7 @@ impl Flow {
         let task_id = TaskId(self.tasks.len());
         self.task_metas.insert(task_id.clone(), TaskMeta { name: name.into() });
         let typed_t = Box::new(TaskAdapter::new(task));
-        self.tasks.entry(task_id.clone()).or_insert(typed_t);
+        self.tasks.push(Some(typed_t));
         self.indegrees.entry(task_id.clone()).or_insert(InDegree(0));
         DependencyBuilder::new(task_id, self)
     }
@@ -65,7 +65,7 @@ impl Flow {
         let task_id = TaskId(self.tasks.len());
         self.task_metas.insert(task_id.clone(), TaskMeta { name: name.into() });
         let typed_t = Box::new(TaskAdapter::new(task));
-        self.tasks.entry(task_id.clone()).or_insert(typed_t);
+        self.tasks.push(Some(typed_t));
         self.indegrees.entry(task_id.clone()).or_insert(InDegree(0));
         OutputWrapper::new(task_id)
     }
@@ -87,13 +87,19 @@ impl Flow {
             let mut handles = Vec::new();
             if layer.len() == 1 { // avoid overhead of tokio runtime scheduling
                 let task_id = &layer[0];
-                let task = self.tasks.remove(task_id).ok_or_else(|| FlowError::TaskNotFound(task_id.0))?;
-                if let Some(dep) = self.rev_edges.get(task_id) {
-                    let inputs: Vec<Arc<dyn Any + Send + Sync>> = dep.iter().filter_map(
-                            |v| {
-                                outputs.get(v).cloned()
-                            }
-                        ).collect();
+                // use Vec<Option<T>> to avoid reallocating elements
+                let task = self.tasks[task_id.0].take();
+                if let Some(task) = task {
+                    let inputs = match self.rev_edges.get(task_id) {
+                        Some(dep) => {
+                            dep.iter().filter_map(
+                                |v| {
+                                    outputs.get(v).cloned()
+                                }
+                            ).collect()
+                        },
+                        None => Vec::new()
+                    };
                     // inlined execution
                     if let Ok(output) = task.invoke(inputs).await {
                         outputs.insert(task_id.clone(), output);
@@ -103,23 +109,22 @@ impl Flow {
             }
 
             for task_id in &layer {
-                let task = self.tasks.remove(task_id)
-                    .ok_or(FlowError::TaskNotFound(task_id.0))?;
+                if let Some(task) = self.tasks[task_id.0].take() {
+                    let input: Vec<Arc<dyn Any + Send + Sync>> = match self.rev_edges.get(task_id) {
+                        Some(deps) if !deps.is_empty() => {
+                            deps.iter().filter_map(|id| {
+                                outputs.get(id).cloned()
+                            }).collect()
+                        }
+                        _ => {
+                            Vec::new()
+                        }
+                    };
 
-                let input: Vec<Arc<dyn Any + Send + Sync>> = match self.rev_edges.get(task_id) {
-                    Some(deps) if !deps.is_empty() => {
-                        deps.iter().filter_map(|id| {
-                            outputs.get(id).cloned()
-                        }).collect()
-                    }
-                    _ => {
-                        Vec::new()
-                    }
-                };
-
-                let fut = task.invoke(input);
-                let tid = task_id.clone();
-                handles.push((tid, tokio::spawn(fut)));
+                    let fut = task.invoke(input);
+                    let tid = task_id.clone();
+                    handles.push((tid, tokio::spawn(fut)));
+                }
             }
 
             for (tid, handle) in handles {
