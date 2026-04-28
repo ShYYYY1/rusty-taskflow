@@ -1,8 +1,8 @@
 use crate::tf::{errors::FlowError, flow::{Flow, TaskId}, task::{TaskInput, TaskOutput}};
-use std::{any::Any, future::Future, pin::Pin, sync::Arc};
+use std::{any::Any, collections::VecDeque, future::Future, pin::Pin, sync::Arc};
 
-pub trait FromAnyVec: Sized + Send + Sync + 'static {
-    fn from_any_vec(inputs: Vec<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError>;
+pub trait FromAnyVecDeque: Sized + Send + Sync + 'static {
+    fn from_any_vecdeque(inputs: VecDeque<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError>;
 }
 
 pub trait SyncTask {
@@ -28,7 +28,7 @@ impl<T> AsyncTask for T
 }
 
 pub trait InvocableTask {
-    fn invoke(self: Box<Self>, input: Vec<Arc<dyn Any + Send + Sync>>) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Any + Send + Sync>, String>> + Send>>;
+    fn invoke(self: Box<Self>, input: VecDeque<Arc<dyn Any + Send + Sync>>) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Any + Send + Sync>, String>> + Send>>;
 }
 
 pub trait IntoDependencies<InputType> {

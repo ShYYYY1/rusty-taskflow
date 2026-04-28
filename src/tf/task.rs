@@ -1,14 +1,14 @@
-use std::{any::Any, future::Future, pin::Pin, sync::Arc};
+use std::{any::Any, collections::VecDeque, future::Future, pin::Pin, sync::Arc};
 
-use crate::tf::{errors::FlowError, traits::{AsyncTask, FromAnyVec, InvocableTask}};
+use crate::tf::{errors::FlowError, traits::{AsyncTask, FromAnyVecDeque, InvocableTask}};
 
 pub struct TaskInput<T = ()>(pub(crate) T);
 pub struct TaskOutput<T = ()>(pub(crate) T);
 
-type Inputs = Vec<Arc<dyn Any + Send + Sync>>;
+type Inputs = VecDeque<Arc<dyn Any + Send + Sync>>;
 
-impl FromAnyVec for () {
-    fn from_any_vec(inputs: Vec<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError> {
+impl FromAnyVecDeque for () {
+    fn from_any_vecdeque(inputs: VecDeque<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError> {
         if !inputs.is_empty() {
             return Err(FlowError::SourceTaskHasNoInput(inputs.len()));
         }
@@ -16,17 +16,17 @@ impl FromAnyVec for () {
     }
 }
 
-macro_rules! impl_from_any_vec {
+macro_rules! impl_from_any_vecdeque {
     ($($idx:tt : $T:ident),+) => {
-        impl<$($T: Send + Sync + 'static),+> FromAnyVec for ($(Arc<$T>,)+) {
-            fn from_any_vec(mut inputs: Vec<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError> {
-                const ARITY: usize = impl_from_any_vec!(@count $($T),+);
+        impl<$($T: Send + Sync + 'static),+> FromAnyVecDeque for ($(Arc<$T>,)+) {
+            fn from_any_vecdeque(mut inputs: VecDeque<Arc<dyn Any + Send + Sync>>) -> Result<Self, FlowError> {
+                const ARITY: usize = impl_from_any_vecdeque!(@count $($T),+);
                 if inputs.len() != ARITY {
                     return Err(FlowError::TaskInputsNumError(ARITY, inputs.len()));
                 }
-                inputs.reverse();
+                // inputs.reverse();
                 Ok(($({
-                        let arc = inputs.pop().unwrap();
+                        let arc = inputs.pop_front().unwrap();
                         arc.downcast::<$T>()
                             .map_err(|_| {
                                 FlowError::TaskInputTypeDowncastError(
@@ -37,17 +37,17 @@ macro_rules! impl_from_any_vec {
             }
         }
     };
-    (@count $($T:ident),+) => { [$(impl_from_any_vec!(@replace $T ())),+].len() };
+    (@count $($T:ident),+) => { [$(impl_from_any_vecdeque!(@replace $T ())),+].len() };
     (@replace $_t:ident $val:expr) => { $val };
 }
 
-// impl_from_any_vec! macro for generating FromAnyVec implementations for tuples, vector of 6 elements top supported
-impl_from_any_vec!(0: A);
-impl_from_any_vec!(0: A, 1: B);
-impl_from_any_vec!(0: A, 1: B, 2: C);
-impl_from_any_vec!(0: A, 1: B, 2: C, 3: D);
-impl_from_any_vec!(0: A, 1: B, 2: C, 3: D, 4: E);
-impl_from_any_vec!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+// impl_from_any_vecdeque! macro for generating FromAnyVec implementations for tuples, vector of 6 elements top supported
+impl_from_any_vecdeque!(0: A);
+impl_from_any_vecdeque!(0: A, 1: B);
+impl_from_any_vecdeque!(0: A, 1: B, 2: C);
+impl_from_any_vecdeque!(0: A, 1: B, 2: C, 3: D);
+impl_from_any_vecdeque!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_from_any_vecdeque!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 
 pub struct TaskAdapter<I, O, T>
 where 
@@ -72,11 +72,11 @@ where
 impl<I, O, T> InvocableTask for TaskAdapter<I, O, T>
 where 
     T: AsyncTask<Input = I, Output = O> + Send + 'static,
-    I: FromAnyVec,
+    I: FromAnyVecDeque,
     O: Send + Sync + 'static
 {
     fn invoke(self: Box<Self>, input: Inputs) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Any + Send + Sync>, String>> + Send>> {
-        let input_tup = match I::from_any_vec(input) {
+        let input_tup = match I::from_any_vecdeque(input) {
             Ok(v) => v,
             Err(e) => return Box::pin(async move { Err(e.to_string()) }),
         };
@@ -110,7 +110,7 @@ mod test {
 
     #[sync_task]
     impl MultiplyAndPrint {
-        fn run(self, a: i32, b: i32) -> i32 {
+        fn run(self, a: &i32, b: &i32) -> i32 {
             println!("multiply res: {}", a * b);
             a * b
         }
@@ -123,7 +123,7 @@ mod test {
         let multi_task = MultiplyAndPrint;
         let multi_typed_task = TaskAdapter::new(multi_task);
         let task_list: Vec<Box<dyn InvocableTask>> = vec![Box::new(add_typed_task), Box::new(multi_typed_task)];
-        let a_input: Vec<Arc<dyn Any + Send + Sync>> = vec![Arc::new(100), Arc::new(3000)];
+        let a_input: VecDeque<Arc<dyn Any + Send + Sync>> = vec![Arc::new(100) as Arc<dyn Any + Send + Sync>, Arc::new(3000)].into();
         let mut task_list_iter = task_list.into_iter();
         let a_fut = task_list_iter.next().unwrap().invoke(a_input);
         let res = tokio::spawn(a_fut).await.unwrap().unwrap().downcast::<i32>();
