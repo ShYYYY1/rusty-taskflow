@@ -166,38 +166,31 @@ fn parse_signature(run_fn: &ImplItemFn) -> syn::Result<(ReceiverKind, Vec<ArgInf
                 };
 
                 let ident = pat_ident.ident.clone();
-                // 输入参数现在是 Arc<T>，根据用户签名中的参数形式生成对应的调用表达式：
-                // &T     → &*arc（零开销解引用）
-                // &mut T → Arc::make_mut（仅在多引用时 clone）
-                // T      → Arc::try_unwrap（仅在多引用时 clone）
+                // 为避免运行时按值入参触发 Arc::try_unwrap + clone，
+                // 强制要求业务层 task `run` 的所有依赖入参都写成 `&T`。
+                // 允许:  &T
+                // 禁止:  T / &mut T
                 match typed.ty.as_ref() {
-                    Type::Reference(r) => {
+                    Type::Reference(r) if r.mutability.is_none() => {
                         let inner = (*r.elem).clone();
-                        if r.mutability.is_some() {
-                            args.push(ArgInfo {
-                                binding: ident.clone(),
-                                input_ty: inner,
-                                call_expr: quote! { std::sync::Arc::make_mut(&mut #ident) },
-                                needs_mut_binding: true,
-                            });
-                        } else {
-                            args.push(ArgInfo {
-                                binding: ident.clone(),
-                                input_ty: inner,
-                                call_expr: quote! { &*#ident },
-                                needs_mut_binding: false,
-                            });
-                        }
-                    }
-                    other_ty => {
                         args.push(ArgInfo {
                             binding: ident.clone(),
-                            input_ty: other_ty.clone(),
-                            call_expr: quote! {
-                                std::sync::Arc::try_unwrap(#ident).unwrap_or_else(|arc| (*arc).clone())
-                            },
+                            input_ty: inner,
+                            call_expr: quote! { &*#ident },
                             needs_mut_binding: false,
                         });
+                    }
+                    Type::Reference(r) if r.mutability.is_some() => {
+                        return Err(syn::Error::new(
+                            r.span(),
+                            "task `run` args must use shared references `&T`; mutable refs `&mut T` are not supported",
+                        ));
+                    }
+                    other_ty => {
+                        return Err(syn::Error::new(
+                            other_ty.span(),
+                            "task `run` args must use shared references `&T`; by-value args are not supported",
+                        ));
                     }
                 }
             }

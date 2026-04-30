@@ -1,6 +1,6 @@
 use std::{any::Any, collections::{HashMap, VecDeque}, sync::Arc};
 
-use crate::tf::{dependency::{DependencyBuilder, OutputWrapper}, errors::{FlowError, TaskError}, task::TaskAdapter, traits::{AsyncTask, FromAnyVec, InvocableTask}};
+use crate::tf::{dependency::{DependencyBuilder, OutputWrapper}, errors::{FlowError, TaskError}, task::TaskAdapter, traits::{AsyncTask, FromAnyVecDeque, InvocableTask}};
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 pub struct TaskId(pub usize);
@@ -42,7 +42,7 @@ impl Flow {
         task: impl AsyncTask<Input = I, Output = O> + Send + 'static
     ) -> DependencyBuilder<'flow, I, O>
     where
-        I: FromAnyVec,
+        I: FromAnyVecDeque,
         O: Send + Sync + 'static
     {
         let task_id = TaskId(self.tasks.len());
@@ -59,7 +59,7 @@ impl Flow {
         task: impl AsyncTask<Input = I, Output = O> + Send + 'static
     ) -> OutputWrapper<O>
     where
-        I: FromAnyVec,
+        I: FromAnyVecDeque,
         O: Send + Sync + 'static
     {
         let task_id = TaskId(self.tasks.len());
@@ -90,7 +90,7 @@ impl Flow {
                 // use Vec<Option<T>> to avoid reallocating elements
                 let task = self.tasks[task_id.0].take();
                 if let Some(task) = task {
-                    let inputs = match self.rev_edges.get(task_id) {
+                    let inputs: VecDeque<Arc<dyn Any + Send + Sync>> = match self.rev_edges.get(task_id) {
                         Some(dep) => {
                             dep.iter().filter_map(
                                 |v| {
@@ -98,7 +98,7 @@ impl Flow {
                                 }
                             ).collect()
                         },
-                        None => Vec::new()
+                        None => VecDeque::new()
                     };
                     // inlined execution
                     if let Ok(output) = task.invoke(inputs).await {
@@ -110,17 +110,16 @@ impl Flow {
 
             for task_id in &layer {
                 if let Some(task) = self.tasks[task_id.0].take() {
-                    let input: Vec<Arc<dyn Any + Send + Sync>> = match self.rev_edges.get(task_id) {
+                    let input: VecDeque<Arc<dyn Any + Send + Sync>> = match self.rev_edges.get(task_id) {
                         Some(deps) if !deps.is_empty() => {
                             deps.iter().filter_map(|id| {
                                 outputs.get(id).cloned()
                             }).collect()
                         }
                         _ => {
-                            Vec::new()
+                            VecDeque::new()
                         }
                     };
-
                     let fut = task.invoke(input);
                     let tid = task_id.clone();
                     handles.push((tid, tokio::spawn(fut)));
@@ -222,7 +221,7 @@ mod test {
     struct AddAndPrint;
     #[sync_task]
     impl AddAndPrint {
-        fn run(self, data1: u8, data2: u8) -> AddAndPrintOutput {
+        fn run(self, data1: &u8, data2: &u8) -> AddAndPrintOutput {
             println!("data: {}", data1 + data2);
             AddAndPrintOutput { data: data1 + data2, message: "this is AddAndPrint".to_string() }
         }
@@ -241,7 +240,7 @@ mod test {
             MultiplyAndPrint { factor: 2 }
         }
 
-        fn run (self, add_output: AddAndPrintOutput) -> MultiplyAndPrintOutput {
+        fn run (self, add_output: &AddAndPrintOutput) -> MultiplyAndPrintOutput {
             println!("here is the message from prev node: {}", add_output.message);
             MultiplyAndPrintOutput(self.factor * add_output.data)
         }
@@ -261,7 +260,7 @@ mod test {
 
     #[async_task]
     impl AddThree {
-        async fn run(self, a: GenerateThreeValueOutput) -> u8 {
+        async fn run(self, a: &GenerateThreeValueOutput) -> u8 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             a.0 + a.1 + a.2
         }
@@ -271,7 +270,7 @@ mod test {
 
     #[async_task]
     impl FinalTask {
-        async fn run(self, a: MultiplyAndPrintOutput, b: u8) -> u8 {
+        async fn run(self, a: &MultiplyAndPrintOutput, b: &u8) -> u8 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             println!("Final result: pipeline1: {}, pipeline2: {}", a.0, b);
             a.0 + b
