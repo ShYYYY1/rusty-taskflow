@@ -2,8 +2,8 @@ use std::{any::Any, collections::VecDeque, future::Future, pin::Pin, sync::Arc};
 
 use crate::tf::{errors::FlowError, traits::{AsyncTask, FromAnyVecDeque, InvocableTask}};
 
-pub struct TaskInput<T = ()>(pub(crate) T);
-pub struct TaskOutput<T = ()>(pub(crate) T);
+pub struct TaskInput<T = ()>(pub T);
+pub struct TaskOutput<T = ()>(pub T);
 
 type Inputs = VecDeque<Arc<dyn Any + Send + Sync>>;
 

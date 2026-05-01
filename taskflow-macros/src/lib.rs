@@ -1,24 +1,38 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, spanned::Spanned, FnArg, ImplItem, ImplItemFn, ItemImpl, Pat, ReturnType,
+    parse::Parser,
+    parse_macro_input,
+    parse_quote,
+    spanned::Spanned,
+    FnArg,
+    ImplItem,
+    ImplItemFn,
+    ItemImpl,
+    LitStr,
+    Pat,
+    ReturnType,
     Type,
 };
 
 #[proc_macro_attribute]
-pub fn sync_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_task(item, false)
+pub fn sync_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    expand_task(attr, item, false)
 }
 
 #[proc_macro_attribute]
-pub fn async_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    expand_task(item, true)
+pub fn async_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    expand_task(attr, item, true)
 }
 
-fn expand_task(item: TokenStream, expect_async: bool) -> TokenStream {
+fn expand_task(attr: TokenStream, item: TokenStream, expect_async: bool) -> TokenStream {
     let input_impl = parse_macro_input!(item as ItemImpl);
+    let root_path = match parse_root_path(attr) {
+        Ok(path) => path,
+        Err(err) => return err.to_compile_error().into(),
+    };
 
-    match build_task_impl(&input_impl, expect_async) {
+    match build_task_impl(&input_impl, expect_async, &root_path) {
         Ok(expanded) => TokenStream::from(quote! {
             #input_impl
             #expanded
@@ -27,10 +41,37 @@ fn expand_task(item: TokenStream, expect_async: bool) -> TokenStream {
     }
 }
 
+fn parse_root_path(attr: TokenStream) -> core::result::Result <syn::Path, syn::Error> {
+    if attr.is_empty() {
+        return Ok(parse_quote!(crate));
+    }
+
+    let mut parsed_path = None::<syn::Path>;
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("path") {
+            let lit: LitStr = meta.value()?.parse()?;
+            parsed_path = Some(lit.parse()?);
+            Ok(())
+        } else {
+            Err(meta.error("unsupported argument; expected `path = \"::taskflow\"`"))
+        }
+    });
+
+    parser.parse2(proc_macro2::TokenStream::from(attr))?;
+
+    parsed_path.ok_or_else(|| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "missing `path` argument; expected `path = \"::taskflow\"`",
+        )
+    })
+}
+
 fn build_task_impl(
     input_impl: &ItemImpl,
     expect_async: bool,
-) -> syn::Result<proc_macro2::TokenStream> {
+    root_path: &syn::Path,
+) -> core::result::Result <proc_macro2::TokenStream, syn::Error> {
     let self_ty = &input_impl.self_ty;
     let run_fn = find_run_fn(input_impl)?;
 
@@ -57,25 +98,24 @@ fn build_task_impl(
 
     let destructure = build_destructure(&arg_infos);
     let call_args: Vec<_> = arg_infos.iter().map(|arg| arg.call_expr.clone()).collect();
-
     let (receiver_setup, call_expr) = build_inherent_call(self_ty, receiver_kind, &call_args);
 
     let trait_name = if expect_async {
-        quote! { crate::tf::traits::AsyncTask }
+        quote! { #root_path::tf::traits::AsyncTask }
     } else {
-        quote! { crate::tf::traits::SyncTask }
+        quote! { #root_path::tf::traits::SyncTask }
     };
 
     let run_method = if expect_async {
         quote! {
             fn run(
                 self,
-                input: crate::tf::task::TaskInput<Self::Input>,
-            ) -> impl std::future::Future<Output = crate::tf::task::TaskOutput<Self::Output>> + Send {
+                input: #root_path::tf::task::TaskInput<Self::Input>,
+            ) -> impl std::future::Future<Output = #root_path::tf::task::TaskOutput<Self::Output>> + Send {
                 async move {
                     #destructure
                     #receiver_setup
-                    crate::tf::task::TaskOutput(#call_expr.await)
+                    #root_path::tf::task::TaskOutput(#call_expr.await)
                 }
             }
         }
@@ -83,11 +123,11 @@ fn build_task_impl(
         quote! {
             fn run(
                 self,
-                input: crate::tf::task::TaskInput<Self::Input>,
-            ) -> crate::tf::task::TaskOutput<Self::Output> {
+                input: #root_path::tf::task::TaskInput<Self::Input>,
+            ) -> #root_path::tf::task::TaskOutput<Self::Output> {
                 #destructure
                 #receiver_setup
-                crate::tf::task::TaskOutput(#call_expr)
+                #root_path::tf::task::TaskOutput(#call_expr)
             }
         }
     };
@@ -102,7 +142,7 @@ fn build_task_impl(
     })
 }
 
-fn find_run_fn(input_impl: &ItemImpl) -> syn::Result<&ImplItemFn> {
+fn find_run_fn(input_impl: &ItemImpl) -> core::result::Result <&ImplItemFn, syn::Error> {
     let mut run_fn: Option<&ImplItemFn> = None;
 
     for item in &input_impl.items {
@@ -142,7 +182,9 @@ struct ArgInfo {
     needs_mut_binding: bool,
 }
 
-fn parse_signature(run_fn: &ImplItemFn) -> syn::Result<(ReceiverKind, Vec<ArgInfo>)> {
+fn parse_signature(
+    run_fn: &ImplItemFn,
+) -> core::result::Result <(ReceiverKind, std::vec::Vec <ArgInfo>), syn::Error> {
     let mut receiver = ReceiverKind::None;
     let mut args = Vec::new();
 
@@ -166,10 +208,6 @@ fn parse_signature(run_fn: &ImplItemFn) -> syn::Result<(ReceiverKind, Vec<ArgInf
                 };
 
                 let ident = pat_ident.ident.clone();
-                // 为避免运行时按值入参触发 Arc::try_unwrap + clone，
-                // 强制要求业务层 task `run` 的所有依赖入参都写成 `&T`。
-                // 允许:  &T
-                // 禁止:  T / &mut T
                 match typed.ty.as_ref() {
                     Type::Reference(r) if r.mutability.is_none() => {
                         let inner = (*r.elem).clone();
@@ -204,8 +242,6 @@ fn build_input_type(args: &[ArgInfo]) -> proc_macro2::TokenStream {
     match args {
         [] => quote! { () },
         _ => {
-            // 每个参数类型包装为 Arc<T>，与 FromAnyVec 的 (Arc<A>, Arc<B>, ...) 实现一致
-            // 尾逗号确保 1-tuple 语法正确
             let tys = args.iter().map(|arg| {
                 let ty = &arg.input_ty;
                 quote! { std::sync::Arc<#ty> }
@@ -219,8 +255,6 @@ fn build_destructure(args: &[ArgInfo]) -> proc_macro2::TokenStream {
     match args {
         [] => quote! { let _ = input; },
         _ => {
-            // 统一元组解构: 1-arg → let (data,) = input.0;
-            //               N-arg → let (a, b,) = input.0;
             let bindings = args.iter().map(|arg| {
                 let ident = &arg.binding;
                 if arg.needs_mut_binding {

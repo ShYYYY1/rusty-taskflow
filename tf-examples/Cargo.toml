@@ -1,0 +1,14 @@
+[package]
+name = "tf-examples"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "tf-examples"
+path = "src/main.rs"
+
+[dependencies]
+taskflow = { path = ".." }
+
+[build-dependencies]
+taskflow-build = { workspace = true }

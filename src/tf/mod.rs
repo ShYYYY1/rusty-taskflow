@@ -8,5 +8,7 @@ pub mod traits;
 
 pub mod dependency;
 
+pub mod task_registry;
+
 #[cfg(test)]
 mod bench;

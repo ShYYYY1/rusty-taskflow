@@ -1,3 +1,4 @@
+use figment::Error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -7,8 +8,11 @@ pub enum TaskError {
     TaskExecutionError(usize, String)
 }
 
-#[derive(Error, Deserialize, Serialize, Debug)]
+#[derive(Error, Debug)]
 pub enum FlowError {
+    #[error("configuration error: {0}")]
+    ConfigError(#[from] Error),
+
     #[error("flow has cycle")]
     HasCycle,
 
@@ -26,6 +30,9 @@ pub enum FlowError {
 
     #[error("task: {0}'s meta not found")]
     TaskMetaNotFound(usize),
+
+    #[error("invalid flow configuration: {0}")]
+    ConfigBuildError(String),
 
     #[error(transparent)]
     TaskExecutionError(#[from] TaskError),

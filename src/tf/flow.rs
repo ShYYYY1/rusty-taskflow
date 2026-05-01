@@ -70,6 +70,19 @@ impl Flow {
         OutputWrapper::new(task_id)
     }
 
+    pub fn commit_invocable_task(
+        &mut self,
+        name: impl Into<String>,
+        task: Box<dyn InvocableTask>,
+    ) -> TaskId {
+        let task_id = TaskId(self.tasks.len());
+        self.task_metas
+            .insert(task_id.clone(), TaskMeta { name: name.into() });
+        self.tasks.push(Some(task));
+        self.indegrees.entry(task_id.clone()).or_insert(InDegree(0));
+        task_id
+    }
+
     pub fn add_edges(&mut self, from: TaskId, to: TaskId) {
         self.edges.entry(from.clone()).or_insert_with(Vec::new).push(to.clone());
         self.rev_edges.entry(to.clone()).or_insert_with(Vec::new).push(from);

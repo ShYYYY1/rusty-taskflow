@@ -1,0 +1,34 @@
+[flow]
+name = "fib"
+
+[[flow.source]]
+name = "FibSource1"
+description = "task to generate first fib"
+task_type = "Source"
+dependencies = []
+output = "fib1"
+builder = "crate::config_tasks::FibSource1::new()"
+
+[[flow.source]]
+name = "FibSource2"
+description = "task to generate second fib"
+task_type = "Source"
+dependencies = []
+output = "fib2"
+builder = "crate::config_tasks::FibSource2::new()"
+
+[[flow.processor]]
+name = "Merger"
+description = "merge first fib and second fib result"
+task_type = "Processor"
+dependencies = ["fib1", "fib2"]
+output = "fib_result"
+builder = "crate::config_tasks::Merger::new()"
+
+[flow.sink]
+name = "Multiply"
+description = "multiply merged fib result"
+task_type = "Sink"
+dependencies = ["fib_result"]
+output = "multiply_result"
+builder = "crate::config_tasks::Multiply::new()"
