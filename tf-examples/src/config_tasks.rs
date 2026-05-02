@@ -10,7 +10,7 @@ impl FibSource1 {
 
 #[sync_task(path = "::taskflow")]
 impl FibSource1 {
-    fn run(self) -> u8 {
+    fn run(self) ->u64 {
         10
     }
 }
@@ -25,7 +25,7 @@ impl FibSource2 {
 
 #[sync_task(path = "::taskflow")]
 impl FibSource2 {
-    fn run(self) -> u8 {
+    fn run(self) ->u64 {
         10
     }
 }
@@ -40,13 +40,35 @@ impl Merger {
 
 #[sync_task(path = "::taskflow")]
 impl Merger {
-    fn run(self, v1: &u8, v2: &u8) -> u8 {
+    fn run(self, v1: &u64, v2: &u64) ->u64 {
+        println!("Merger output: {}", v1 + v2);
         v1 + v2
     }
 }
 
+pub struct Fib;
+#[sync_task(path = "::taskflow")]
+impl Fib {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn fib(v: &u64) ->u64 {
+        if *v <= 1u64 {
+            return *v;
+        }
+        Self::fib(&(*v - 1)) + Self::fib(&(*v - 2))
+    }
+
+    fn run(self, v: &u64) ->u64 {
+        let res = Self::fib(v);
+        println!("Fib result: {res}");
+        res
+    }
+}
+
 pub struct Multiply {
-    factor: u8,
+    factor:u64,
 }
 
 impl Multiply {
@@ -57,7 +79,7 @@ impl Multiply {
 
 #[sync_task(path = "::taskflow")]
 impl Multiply {
-    fn run(self, v: &u8) -> u8 {
+    fn run(self, v: &u64) ->u64 {
         self.factor * v
     }
 }

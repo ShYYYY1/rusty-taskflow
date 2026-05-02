@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 taskflow = { path = ".." }
+tokio = { workspace = true }
 
 [build-dependencies]
 taskflow-build = { workspace = true }

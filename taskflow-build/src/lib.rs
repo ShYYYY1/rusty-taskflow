@@ -1,8 +1,8 @@
+pub mod macros;
+
 use serde::Deserialize;
 use std::{
-    collections::{HashMap, VecDeque},
-    fs,
-    path::{Path, PathBuf},
+    collections::{HashMap, VecDeque}, env, fs, path::{Path, PathBuf}
 };
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +42,7 @@ struct Node {
     output: String,
     builder: String,
     is_source: bool,
+    is_sink: bool,
 }
 
 fn to_unix(path: &Path) -> String {
@@ -151,15 +152,24 @@ fn render_flow_builder(func_name: &str, nodes: &[Node]) -> Result<String, String
     }
 
     let mut output_to_var = HashMap::new();
+    let mut seen_vars = HashMap::new();
     for node in nodes {
-        output_to_var.insert(node.output.clone(), sanitize_ident(&node.output));
+        let sanitized = sanitize_ident(&node.output);
+        if let Some(prev) = seen_vars.insert(sanitized.clone(), &node.output) {
+            return Err(format!(
+                "outputs '{}' and '{}' produce the same variable name '{sanitized}'",
+                prev, node.output
+            ));
+        }
+        output_to_var.insert(node.output.clone(), sanitized);
     }
 
     let order = topo_sort(nodes)?;
 
+    let mut sink_var_name: Option<String> = None;
     let mut body = String::new();
     body.push_str(&format!(
-        "fn {func_name}() -> taskflow::tf::flow::Flow {{\n    let mut flow = taskflow::tf::flow::Flow::new();\n"
+        "fn {func_name}() -> (taskflow::tf::flow::Flow, taskflow::tf::flow::TaskId) {{\n    let mut flow = taskflow::tf::flow::Flow::new();\n"
     ));
 
     for idx in order {
@@ -198,9 +208,80 @@ fn render_flow_builder(func_name: &str, nodes: &[Node]) -> Result<String, String
             "    let {var_name} = flow.commit_task(\"{}\", {}).with_dependencies({deps_expr});\n",
             node.name, node.builder
         ));
+
+        if node.is_sink {
+            sink_var_name = Some(var_name.clone());
+        }
     }
 
-    body.push_str("    flow\n}\n");
+    let sink_var_name = sink_var_name.ok_or_else(|| "sink task not found in flow nodes".to_string())?;
+    body.push_str(&format!(
+        "    let sink_task_id = {sink_var_name}.id.clone();\n    (flow, sink_task_id)\n}}\n"
+    ));
+    Ok(body)
+}
+
+fn render_flow_runner(func_name: &str, nodes: &[Node]) -> Result<String, String> {
+    let mut output_to_var = HashMap::new();
+    for node in nodes {
+        output_to_var.insert(node.output.clone(), sanitize_ident(&node.output));
+    }
+
+    let order = topo_sort(nodes)?;
+    let mut sink_var_name: Option<String> = None;
+
+    let mut body = String::new();
+    body.push_str(&format!(
+        "async fn run_{func_name}() -> Result<std::sync::Arc<dyn std::any::Any + Send + Sync>, taskflow::tf::errors::FlowError> {{\n    let mut flow = taskflow::tf::flow::Flow::new();\n"
+    ));
+
+    for idx in order {
+        let node = &nodes[idx];
+        let var_name = output_to_var
+            .get(&node.output)
+            .expect("output variable must exist");
+        if node.is_source {
+            body.push_str(&format!(
+                "    let {var_name} = flow.commit_source_task(\"{}\", {});\n",
+                node.name, node.builder
+            ));
+            continue;
+        }
+
+        let dependency_vars = node
+            .dependencies
+            .iter()
+            .map(|dep| {
+                output_to_var.get(dep).cloned().ok_or_else(|| {
+                    format!(
+                        "task '{}' references unknown dependency output '{}'",
+                        node.name, dep
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let deps_expr = if dependency_vars.len() == 1 {
+            dependency_vars[0].clone()
+        } else {
+            format!("({})", dependency_vars.join(", "))
+        };
+
+        body.push_str(&format!(
+            "    let {var_name} = flow.commit_task(\"{}\", {}).with_dependencies({deps_expr});\n",
+            node.name, node.builder
+        ));
+
+        if node.is_sink {
+            sink_var_name = Some(var_name.clone());
+        }
+    }
+
+    let sink_var_name = sink_var_name.ok_or_else(|| "sink task not found in flow nodes".to_string())?;
+    body.push_str(&format!(
+        "    let output = flow.run({sink_var_name}).await?;\n    Ok(std::sync::Arc::new(output) as std::sync::Arc<dyn std::any::Any + Send + Sync>)\n}}\n"
+    ));
+
     Ok(body)
 }
 
@@ -216,10 +297,13 @@ pub fn generate(index_path: &Path, manifest_dir: &Path, out_dir: &Path) -> Resul
 
     let mut path_entries = Vec::new();
     let mut match_arms = Vec::new();
+    let mut run_match_arms = Vec::new();
     let mut builders = Vec::new();
+    let mut runners = Vec::new();
 
     for (flow_idx, configured) in index.flow_path.paths.iter().enumerate() {
         let resolved = index_dir.join(configured);
+        println!("cargo:rerun-if-changed={}", resolved.display());
 
         let flow_raw = fs::read_to_string(&resolved)
             .map_err(|e| format!("failed to read flow file {}: {e}", resolved.display()))?;
@@ -234,6 +318,7 @@ pub fn generate(index_path: &Path, manifest_dir: &Path, out_dir: &Path) -> Resul
                 output: task.output,
                 builder: task.builder,
                 is_source: true,
+                is_sink: false,
             });
         }
         for task in flow_file.flow.processor {
@@ -243,6 +328,7 @@ pub fn generate(index_path: &Path, manifest_dir: &Path, out_dir: &Path) -> Resul
                 output: task.output,
                 builder: task.builder,
                 is_source: false,
+                is_sink: false,
             });
         }
         nodes.push(Node {
@@ -251,6 +337,7 @@ pub fn generate(index_path: &Path, manifest_dir: &Path, out_dir: &Path) -> Resul
             output: flow_file.flow.sink.output,
             builder: flow_file.flow.sink.builder,
             is_source: false,
+            is_sink: true,
         });
 
         let func_name = format!("build_flow_{flow_idx}");
@@ -258,24 +345,62 @@ pub fn generate(index_path: &Path, manifest_dir: &Path, out_dir: &Path) -> Resul
             .map_err(|e| format!("{}: {e}", resolved.display()))?;
         builders.push(builder_src);
 
+        let runner_src = render_flow_runner(&func_name, &nodes)
+            .map_err(|e| format!("{}: {e}", resolved.display()))?;
+        runners.push(runner_src);
+
         let normalized = normalize_for_concat(manifest_dir, &resolved);
         let path_expr = format!("concat!(env!(\"CARGO_MANIFEST_DIR\"), \"{normalized}\")");
         path_entries.push(format!("    {path_expr}"));
         match_arms.push(format!("        {path_expr} => Some({func_name}()),"));
+        run_match_arms.push(format!("        {path_expr} => run_{func_name}().await,"));
     }
 
     let generated = format!(
         "// @generated by taskflow-build. Do not edit manually.\n\
 pub const GENERATED_FLOW_PATHS: &[&str] = &[\n{}\n];\n\
 \n\
-pub fn build_typed_flow_by_path(path: &str) -> Option<taskflow::tf::flow::Flow> {{\n    match path {{\n{}\n        _ => None,\n    }}\n}}\n\n{}\n",
+pub fn build_flow_by_path(path: &str) -> Option<(taskflow::tf::flow::Flow, taskflow::tf::flow::TaskId)> {{\n    match path {{\n{}\n        _ => None,\n    }}\n}}\n\
+\n\
+pub async fn run_flow_by_path(path: &str) -> Result<std::sync::Arc<dyn std::any::Any + Send + Sync>, taskflow::tf::errors::FlowError> {{\n    match path {{\n{}\n        _ => Err(taskflow::tf::errors::FlowError::ConfigBuildError(format!(\"flow path '{{}}' is not generated\", path))),\n    }}\n}}\n\n{}\n\n{}\n",
         path_entries.join(",\n"),
         match_arms.join("\n"),
-        builders.join("\n")
+        run_match_arms.join("\n"),
+        builders.join("\n"),
+        runners.join("\n")
     );
+
 
     let out_file = out_dir.join("generated_typed_flows.rs");
     fs::write(&out_file, generated)
         .map_err(|e| format!("failed to write generated typed flow file {}: {e}", out_file.display()))?;
     Ok(out_file)
+}
+
+pub fn run_with_default() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
+
+    // use CARGO_MANIFEST_DIR/configs/flows.toml by default
+    let index_path = manifest_dir.join("configs/flows.toml");
+
+    println!("cargo:rerun-if-env-changed=TASKFLOW_FLOW_INDEX_PATH");
+    println!("cargo:rerun-if-changed={}", index_path.display());
+
+    generate(&index_path, &manifest_dir, &out_dir)
+        .unwrap_or_else(|err| panic!("failed to generate typed flow builders: {err}"));
+}
+
+pub fn run_with_env(env_key: &str) {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
+    let env_path = env::var(env_key).expect(format!("{env_key} is not set").as_str());
+    let index_path = PathBuf::from(env_path);
+    let index_path = if index_path.is_absolute() { index_path } else { manifest_dir.join(index_path) };
+
+    println!("cargo:rerun-if-env-changed=TASKFLOW_FLOW_INDEX_PATH");
+    println!("cargo:rerun-if-changed={}", index_path.display());
+
+    generate(&index_path, &manifest_dir, &out_dir)
+        .unwrap_or_else(|err| panic!("failed to generate typed flow builders: {err}"));
 }
