@@ -4,6 +4,8 @@ use std::{
     sync::Arc,
 };
 
+use serde::Serialize;
+
 use crate::tf::{
     dependency::{DependencyBuilder, OutputWrapper},
     errors::{FlowError},
@@ -17,13 +19,9 @@ pub struct TaskId(pub usize);
 #[derive(Clone)]
 struct InDegree(u8);
 
-// todo complete meta datas
+#[derive(Serialize)]
 struct TaskMeta {
-    pub name: String,
-}
-
-pub struct FlowContext {
-    // todo implement FlowContext for managing the flow's state and context
+    pub(crate) name: String,
 }
 
 pub struct Flow {
@@ -81,20 +79,7 @@ impl Flow {
         OutputWrapper::new(task_id)
     }
 
-    pub fn commit_invocable_task(
-        &mut self,
-        name: impl Into<String>,
-        task: Box<dyn InvocableTask>,
-    ) -> TaskId {
-        let task_id = TaskId(self.tasks.len());
-        self.task_metas
-            .insert(task_id.clone(), TaskMeta { name: name.into() });
-        self.tasks.push(Some(task));
-        self.indegrees.entry(task_id.clone()).or_insert(InDegree(0));
-        task_id
-    }
-
-    pub fn add_edges(&mut self, from: TaskId, to: TaskId) {
+    pub(crate) fn add_edges(&mut self, from: TaskId, to: TaskId) {
         self.edges
             .entry(from.clone())
             .or_insert_with(Vec::new)
@@ -223,16 +208,20 @@ impl Flow {
         Ok(layers)
     }
 
-    fn get_task_name(&self, id: &TaskId) -> Result<&str, FlowError> {
-        match self
-            .task_metas
-            .get(id)
-            .ok_or(FlowError::TaskMetaNotFound(id.clone().0))
-        {
-            Ok(meta) => Ok(meta.name.as_str()),
-            Err(e) => Err(e),
-        }
-    }
+    // fn get_task_name(&self, id: &TaskId) -> Result<&str, FlowError> {
+    //     match self
+    //         .task_metas
+    //         .get(id)
+    //         .ok_or(FlowError::TaskMetaNotFound(id.clone().0))
+    //     {
+    //         Ok(meta) => Ok(meta.name.as_str()),
+    //         Err(e) => Err(e),
+    //     }
+    // }
+
+    // pub fn debug_info(&self) {
+        
+    // }
 }
 
 #[cfg(test)]

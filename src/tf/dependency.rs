@@ -37,11 +37,12 @@ macro_rules! impl_into_dependencies {
     };
 }
 
-impl_into_dependencies!(0:A, 1:B);
-impl_into_dependencies!(0:A, 1:B, 2:C);
-impl_into_dependencies!(0:A, 1:B, 2:C, 3:D);
-impl_into_dependencies!(0:A, 1:B, 2:C, 3:D, 4:E);
-impl_into_dependencies!(0:A, 1:B, 2:C, 3:D, 4:E, 5:F);
+impl_into_dependencies!(0: A, 1: B);
+impl_into_dependencies!(0: A, 1: B, 2: C);
+impl_into_dependencies!(0: A, 1: B, 2: C, 3: D);
+impl_into_dependencies!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_into_dependencies!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+impl_into_dependencies!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F, 6: G);
 
 pub struct DependencyBuilder<'flow, I, O> {
     pub id: TaskId,
@@ -51,7 +52,7 @@ pub struct DependencyBuilder<'flow, I, O> {
 }
 
 impl<'flow, I, O> DependencyBuilder<'flow, I, O> {
-    pub fn new(id: TaskId, f: &'flow mut Flow) -> Self {
+    pub(crate) fn new(id: TaskId, f: &'flow mut Flow) -> Self {
         DependencyBuilder { id, flow: f, phantom_in: PhantomData, phantom_out: PhantomData }
     }
 

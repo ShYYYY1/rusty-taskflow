@@ -1,5 +1,6 @@
 mod config_tasks;
 
+// add generated .rs to compile
 include!(concat!(env!("OUT_DIR"), "/generated_typed_flows.rs"));
 
 fn expect_u64(output: &std::sync::Arc<dyn std::any::Any + Send + Sync>, context: &str) -> u64 {

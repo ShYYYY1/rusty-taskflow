@@ -20,3 +20,10 @@ from_any_vecdeque(&mut VecDeque<...>)，减少一次按值传递；
 更大的收益点一般在“减少 Arc clone / HashMap 查找次数 / downcast 次数”。
 一句话结论：
 编译期可能会把这两次转移优化得很轻，它们大概率不是主要开销；但这条路径确实可优化，只是优先级应低于 Arc+downcast+map 查找。
+
+todo:
+1. Task error handling
+2. function to trace and debug Flow
+3. build Flow from config file
+4. easy-use concurrent executor for Flow
+5. data-driven flow to avoid quick task waiting for slow task in the same layer

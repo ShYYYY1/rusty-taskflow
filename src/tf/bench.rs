@@ -17,6 +17,13 @@
 
 use std::time::{Duration, Instant};
 
+use dagrs::{
+    DefaultNode as DagrsNode,
+    EnvVar as DagrsEnvVar,
+    Graph as DagrsGraph,
+    Node as DagrsNodeTrait,
+    NodeTable as DagrsNodeTable,
+};
 use dagx::{DagRunner, TaskHandle};
 use taskflow_macros::{async_task, sync_task};
 
@@ -146,6 +153,20 @@ fn row3(label: &str, tf: BenchStats, dx: BenchStats, bl: BenchStats) {
     println!("    +----------+-----------+-----------+-----------+-----------+-----------+");
 }
 
+fn row4(label: &str, tf: BenchStats, dx: BenchStats, dr: BenchStats, bl: BenchStats) {
+    fn pct(a: f64, b: f64) -> f64 {
+        if b > 0.01 { (a - b) / b * 100.0 } else { 0.0 }
+    }
+
+    println!("  {label}");
+    print_table_header();
+    print_table_row("taskflow", tf, Some(pct(tf.mean_ms, bl.mean_ms)));
+    print_table_row("dagx", dx, Some(pct(dx.mean_ms, bl.mean_ms)));
+    print_table_row("dagrs", dr, Some(pct(dr.mean_ms, bl.mean_ms)));
+    print_table_row("baseline", bl, None);
+    println!("    +----------+-----------+-----------+-----------+-----------+-----------+");
+}
+
 fn print_phase_table_header() {
     println!("    +----------+-----------+-----------+-----------+-----------+");
     println!("    | engine   | build ms  |  exec ms  | total ms  | ovhd vs b |");
@@ -254,6 +275,104 @@ where
     (
         (BenchStats::from_samples(&tf_samples), last_tf.expect("taskflow result missing")),
         (BenchStats::from_samples(&dx_samples), last_dx.expect("dagx result missing")),
+        (BenchStats::from_samples(&bl_samples), last_bl.expect("baseline result missing")),
+    )
+}
+
+async fn bench_four_with_value<TF, DF, RF, BF, FutT, FutD, FutR, FutB, T, D, R, B>(
+    warmup: usize,
+    runs: usize,
+    mut tf: TF,
+    mut dx: DF,
+    mut dr: RF,
+    mut bl: BF,
+) -> ((BenchStats, T), (BenchStats, D), (BenchStats, R), (BenchStats, B))
+where
+    TF: FnMut() -> FutT,
+    DF: FnMut() -> FutD,
+    RF: FnMut() -> FutR,
+    BF: FnMut() -> FutB,
+    FutT: std::future::Future<Output = T>,
+    FutD: std::future::Future<Output = D>,
+    FutR: std::future::Future<Output = R>,
+    FutB: std::future::Future<Output = B>,
+{
+    let total = warmup + runs;
+    let mut tf_samples = Vec::with_capacity(runs);
+    let mut dx_samples = Vec::with_capacity(runs);
+    let mut dr_samples = Vec::with_capacity(runs);
+    let mut bl_samples = Vec::with_capacity(runs);
+    let mut last_tf = None;
+    let mut last_dx = None;
+    let mut last_dr = None;
+    let mut last_bl = None;
+
+    for round in 0..total {
+        let record = round >= warmup;
+        match round % 4 {
+            0 => {
+                let (t, v) = timed_value(&mut tf).await;
+                if record { tf_samples.push(t); }
+                last_tf = Some(v);
+                let (t, v) = timed_value(&mut dx).await;
+                if record { dx_samples.push(t); }
+                last_dx = Some(v);
+                let (t, v) = timed_value(&mut dr).await;
+                if record { dr_samples.push(t); }
+                last_dr = Some(v);
+                let (t, v) = timed_value(&mut bl).await;
+                if record { bl_samples.push(t); }
+                last_bl = Some(v);
+            }
+            1 => {
+                let (t, v) = timed_value(&mut dx).await;
+                if record { dx_samples.push(t); }
+                last_dx = Some(v);
+                let (t, v) = timed_value(&mut dr).await;
+                if record { dr_samples.push(t); }
+                last_dr = Some(v);
+                let (t, v) = timed_value(&mut bl).await;
+                if record { bl_samples.push(t); }
+                last_bl = Some(v);
+                let (t, v) = timed_value(&mut tf).await;
+                if record { tf_samples.push(t); }
+                last_tf = Some(v);
+            }
+            2 => {
+                let (t, v) = timed_value(&mut dr).await;
+                if record { dr_samples.push(t); }
+                last_dr = Some(v);
+                let (t, v) = timed_value(&mut bl).await;
+                if record { bl_samples.push(t); }
+                last_bl = Some(v);
+                let (t, v) = timed_value(&mut tf).await;
+                if record { tf_samples.push(t); }
+                last_tf = Some(v);
+                let (t, v) = timed_value(&mut dx).await;
+                if record { dx_samples.push(t); }
+                last_dx = Some(v);
+            }
+            _ => {
+                let (t, v) = timed_value(&mut bl).await;
+                if record { bl_samples.push(t); }
+                last_bl = Some(v);
+                let (t, v) = timed_value(&mut tf).await;
+                if record { tf_samples.push(t); }
+                last_tf = Some(v);
+                let (t, v) = timed_value(&mut dx).await;
+                if record { dx_samples.push(t); }
+                last_dx = Some(v);
+                let (t, v) = timed_value(&mut dr).await;
+                if record { dr_samples.push(t); }
+                last_dr = Some(v);
+            }
+        }
+    }
+
+    (
+        (BenchStats::from_samples(&tf_samples), last_tf.expect("taskflow result missing")),
+        (BenchStats::from_samples(&dx_samples), last_dx.expect("dagx result missing")),
+        (BenchStats::from_samples(&dr_samples), last_dr.expect("dagrs result missing")),
         (BenchStats::from_samples(&bl_samples), last_bl.expect("baseline result missing")),
     )
 }
@@ -880,6 +999,590 @@ mod dx {
     }
 }
 
+mod dr {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dagrs::async_trait::async_trait;
+    use dagrs::{Action, Content, EnvVar, InChannels, OutChannels, Output};
+
+    fn expect_one_u64(inputs: Vec<Arc<u64>>, name: &str) -> u64 {
+        *inputs
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{name}: expected one input"))
+    }
+
+    fn expect_two_u64(inputs: Vec<Arc<u64>>, name: &str) -> (u64, u64) {
+        let mut iter = inputs.into_iter();
+        let a = *iter
+            .next()
+            .unwrap_or_else(|| panic!("{name}: expected first input"));
+        let b = *iter
+            .next()
+            .unwrap_or_else(|| panic!("{name}: expected second input"));
+        (a, b)
+    }
+
+    pub struct CpuSource(pub u32);
+    #[async_trait]
+    impl Action for CpuSource {
+        async fn run(&self, _: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let value = super::fib(self.0);
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct CpuStep(pub u32);
+    #[async_trait]
+    impl Action for CpuStep {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let input = expect_one_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "CpuStep",
+            );
+            let value = super::fib(self.0).wrapping_add(input);
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct IoSource(pub u64);
+    #[async_trait]
+    impl Action for IoSource {
+        async fn run(&self, _: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            tokio::time::sleep(Duration::from_millis(self.0)).await;
+            out.broadcast(Content::new(self.0)).await;
+            Output::Out(Some(Content::new(self.0)))
+        }
+    }
+
+    pub struct IoAdd2(pub u64);
+    #[async_trait]
+    impl Action for IoAdd2 {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let (a, b) = expect_two_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "IoAdd2",
+            );
+            tokio::time::sleep(Duration::from_millis(self.0)).await;
+            let value = a + b;
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct MixedSource {
+        pub fib_n: u32,
+        pub sleep_ms: u64,
+    }
+    #[async_trait]
+    impl Action for MixedSource {
+        async fn run(&self, _: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let value = super::fib(self.fib_n);
+            tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct MixedStep {
+        pub fib_n: u32,
+        pub sleep_ms: u64,
+    }
+    #[async_trait]
+    impl Action for MixedStep {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let input = expect_one_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "MixedStep",
+            );
+            let value = super::fib(self.fib_n).wrapping_add(input);
+            tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct MixedAdd2 {
+        pub fib_n: u32,
+        pub sleep_ms: u64,
+    }
+    #[async_trait]
+    impl Action for MixedAdd2 {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let (a, b) = expect_two_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "MixedAdd2",
+            );
+            let value = super::fib(self.fib_n).wrapping_add(a).wrapping_add(b);
+            tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct CpuAdd2;
+    #[async_trait]
+    impl Action for CpuAdd2 {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let (a, b) = expect_two_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "CpuAdd2",
+            );
+            let value = a.wrapping_add(b);
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct CpuAdd3;
+    #[async_trait]
+    impl Action for CpuAdd3 {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let vals: Vec<Arc<u64>> = ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await;
+            let value = vals.iter().fold(0u64, |acc, v| acc.wrapping_add(**v));
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct CpuSourceBlocking(pub u32);
+    #[async_trait]
+    impl Action for CpuSourceBlocking {
+        async fn run(&self, _: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let n = self.0;
+            let value = tokio::task::spawn_blocking(move || super::fib(n)).await.unwrap();
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct CpuStepBlocking(pub u32);
+    #[async_trait]
+    impl Action for CpuStepBlocking {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let input = expect_one_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "CpuStepBlocking",
+            );
+            let n = self.0;
+            let value = tokio::task::spawn_blocking(move || super::fib(n).wrapping_add(input))
+                .await
+                .unwrap();
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    pub struct IoStep(pub u64);
+    #[async_trait]
+    impl Action for IoStep {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let v = expect_one_u64(
+                ins.map(|c| c.unwrap().into_inner::<u64>().unwrap()).await,
+                "IoStep",
+            );
+            tokio::time::sleep(Duration::from_millis(self.0)).await;
+            let value = v + 1;
+            out.broadcast(Content::new(value)).await;
+            Output::Out(Some(Content::new(value)))
+        }
+    }
+
+    fn expect_one_payload(inputs: Vec<Arc<super::ComplexPayload>>, name: &str) -> Arc<super::ComplexPayload> {
+        inputs
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{name}: expected one payload input"))
+    }
+
+    fn expect_two_payload(
+        inputs: Vec<Arc<super::ComplexPayload>>,
+        name: &str,
+    ) -> (Arc<super::ComplexPayload>, Arc<super::ComplexPayload>) {
+        let mut iter = inputs.into_iter();
+        let a = iter.next().unwrap_or_else(|| panic!("{name}: expected first payload"));
+        let b = iter.next().unwrap_or_else(|| panic!("{name}: expected second payload"));
+        (a, b)
+    }
+
+    pub struct ComplexSource {
+        pub seed: u8,
+        pub len: usize,
+    }
+    #[async_trait]
+    impl Action for ComplexSource {
+        async fn run(&self, _: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let payload = super::make_complex_payload(self.seed, self.len);
+            out.broadcast(Content::new(payload.clone())).await;
+            Output::Out(Some(Content::new(payload)))
+        }
+    }
+
+    pub struct ComplexStep {
+        pub salt: u8,
+    }
+    #[async_trait]
+    impl Action for ComplexStep {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let input = expect_one_payload(
+                ins.map(|c| c.unwrap().into_inner::<super::ComplexPayload>().unwrap()).await,
+                "ComplexStep",
+            );
+            let payload = super::mutate_complex_payload(input.as_ref(), self.salt);
+            out.broadcast(Content::new(payload.clone())).await;
+            Output::Out(Some(Content::new(payload)))
+        }
+    }
+
+    pub struct ComplexMerge2;
+    #[async_trait]
+    impl Action for ComplexMerge2 {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let (a, b) = expect_two_payload(
+                ins.map(|c| c.unwrap().into_inner::<super::ComplexPayload>().unwrap()).await,
+                "ComplexMerge2",
+            );
+            let payload = super::merge_complex_payload(a.as_ref(), b.as_ref());
+            out.broadcast(Content::new(payload.clone())).await;
+            Output::Out(Some(Content::new(payload)))
+        }
+    }
+
+    pub struct ComplexScore;
+    #[async_trait]
+    impl Action for ComplexScore {
+        async fn run(&self, ins: &mut InChannels, out: &mut OutChannels, _: Arc<EnvVar>) -> Output {
+            let payload = expect_one_payload(
+                ins.map(|c| c.unwrap().into_inner::<super::ComplexPayload>().unwrap()).await,
+                "ComplexScore",
+            );
+            let score = super::complex_payload_score(payload.as_ref());
+            out.broadcast(Content::new(score)).await;
+            Output::Out(Some(Content::new(score)))
+        }
+    }
+}
+
+async fn run_dagrs_cpu_chain(steps: usize) -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let src = DagrsNode::with_action("dr_src".to_string(), dr::CpuSource(FIB_N), &mut table);
+    let src_id = src.id();
+
+    let mut graph = DagrsGraph::new();
+    graph.add_node(src).unwrap();
+
+    let mut prev = src_id;
+    for i in 0..steps {
+        let node = DagrsNode::with_action(format!("dr_cpu_step_{i}"), dr::CpuStep(FIB_N), &mut table);
+        let node_id = node.id();
+        graph.add_node(node).unwrap();
+        graph.add_edge(prev, vec![node_id]).unwrap();
+        prev = node_id;
+    }
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph
+        .get_results::<u64>()
+        .get(&prev)
+        .unwrap()
+        .clone()
+        .unwrap()
+}
+
+async fn run_dagrs_io_parallel(branches: usize) -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let mut branch_ids = Vec::with_capacity(branches);
+    for i in 0..branches {
+        let node = DagrsNode::with_action(format!("dr_io_src_{i}"), dr::IoSource(SLEEP_MS), &mut table);
+        let id = node.id();
+        graph.add_node(node).unwrap();
+        branch_ids.push(id);
+    }
+
+    while branch_ids.len() > 1 {
+        let a = branch_ids.pop().unwrap();
+        let b = branch_ids.pop().unwrap();
+        let add = DagrsNode::with_action("dr_io_add".to_string(), dr::IoAdd2(SLEEP_MS), &mut table);
+        let add_id = add.id();
+        graph.add_node(add).unwrap();
+        graph.add_edge(a, vec![add_id]).unwrap();
+        graph.add_edge(b, vec![add_id]).unwrap();
+        branch_ids.push(add_id);
+    }
+
+    let sink = branch_ids[0];
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph
+        .get_results::<u64>()
+        .get(&sink)
+        .unwrap()
+        .clone()
+        .unwrap()
+}
+
+async fn run_dagrs_mixed_two_pipelines() -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let a_src = DagrsNode::with_action(
+        "dr_mixed_a_src".to_string(),
+        dr::MixedSource { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+        &mut table,
+    );
+    let a_src_id = a_src.id();
+    graph.add_node(a_src).unwrap();
+
+    let a_step = DagrsNode::with_action(
+        "dr_mixed_a_step".to_string(),
+        dr::MixedStep { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+        &mut table,
+    );
+    let a_step_id = a_step.id();
+    graph.add_node(a_step).unwrap();
+    graph.add_edge(a_src_id, vec![a_step_id]).unwrap();
+
+    let b_src = DagrsNode::with_action(
+        "dr_mixed_b_src".to_string(),
+        dr::MixedSource { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+        &mut table,
+    );
+    let b_src_id = b_src.id();
+    graph.add_node(b_src).unwrap();
+
+    let b_step = DagrsNode::with_action(
+        "dr_mixed_b_step".to_string(),
+        dr::MixedStep { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+        &mut table,
+    );
+    let b_step_id = b_step.id();
+    graph.add_node(b_step).unwrap();
+    graph.add_edge(b_src_id, vec![b_step_id]).unwrap();
+
+    let merge = DagrsNode::with_action(
+        "dr_mixed_merge".to_string(),
+        dr::MixedAdd2 { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+        &mut table,
+    );
+    let merge_id = merge.id();
+    graph.add_node(merge).unwrap();
+    graph.add_edge(a_step_id, vec![merge_id]).unwrap();
+    graph.add_edge(b_step_id, vec![merge_id]).unwrap();
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph
+        .get_results::<u64>()
+        .get(&merge_id)
+        .unwrap()
+        .clone()
+        .unwrap()
+}
+
+async fn run_dagrs_cpu_fan_out() -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let src = DagrsNode::with_action("dr_src".to_string(), dr::CpuSource(FIB_N), &mut table);
+    let src_id = src.id();
+    graph.add_node(src).unwrap();
+
+    let mut p_ids = Vec::with_capacity(6);
+    for i in 0..6 {
+        let p = DagrsNode::with_action(format!("dr_p{i}"), dr::CpuStep(FIB_N), &mut table);
+        let pid = p.id();
+        graph.add_node(p).unwrap();
+        graph.add_edge(src_id, vec![pid]).unwrap();
+        p_ids.push(pid);
+    }
+
+    let a1 = DagrsNode::with_action("dr_a1".to_string(), dr::CpuAdd2, &mut table);
+    let a1_id = a1.id();
+    graph.add_node(a1).unwrap();
+    graph.add_edge(p_ids[0], vec![a1_id]).unwrap();
+    graph.add_edge(p_ids[1], vec![a1_id]).unwrap();
+
+    let a2 = DagrsNode::with_action("dr_a2".to_string(), dr::CpuAdd2, &mut table);
+    let a2_id = a2.id();
+    graph.add_node(a2).unwrap();
+    graph.add_edge(p_ids[2], vec![a2_id]).unwrap();
+    graph.add_edge(p_ids[3], vec![a2_id]).unwrap();
+
+    let a3 = DagrsNode::with_action("dr_a3".to_string(), dr::CpuAdd2, &mut table);
+    let a3_id = a3.id();
+    graph.add_node(a3).unwrap();
+    graph.add_edge(p_ids[4], vec![a3_id]).unwrap();
+    graph.add_edge(p_ids[5], vec![a3_id]).unwrap();
+
+    let fin = DagrsNode::with_action("dr_fin".to_string(), dr::CpuAdd3, &mut table);
+    let fin_id = fin.id();
+    graph.add_node(fin).unwrap();
+    graph.add_edge(a1_id, vec![fin_id]).unwrap();
+    graph.add_edge(a2_id, vec![fin_id]).unwrap();
+    graph.add_edge(a3_id, vec![fin_id]).unwrap();
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph.get_results::<u64>().get(&fin_id).unwrap().clone().unwrap()
+}
+
+async fn run_dagrs_cpu_diamond() -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let s1 = DagrsNode::with_action("dr_s1".to_string(), dr::CpuSource(FIB_N), &mut table);
+    let s1_id = s1.id();
+    graph.add_node(s1).unwrap();
+
+    let s2 = DagrsNode::with_action("dr_s2".to_string(), dr::CpuSource(FIB_N), &mut table);
+    let s2_id = s2.id();
+    graph.add_node(s2).unwrap();
+
+    let c1 = DagrsNode::with_action("dr_c1".to_string(), dr::CpuStep(FIB_N), &mut table);
+    let c1_id = c1.id();
+    graph.add_node(c1).unwrap();
+    graph.add_edge(s1_id, vec![c1_id]).unwrap();
+
+    let c2 = DagrsNode::with_action("dr_c2".to_string(), dr::CpuStep(FIB_N), &mut table);
+    let c2_id = c2.id();
+    graph.add_node(c2).unwrap();
+    graph.add_edge(s2_id, vec![c2_id]).unwrap();
+
+    let merge = DagrsNode::with_action("dr_merge".to_string(), dr::CpuAdd2, &mut table);
+    let merge_id = merge.id();
+    graph.add_node(merge).unwrap();
+    graph.add_edge(c1_id, vec![merge_id]).unwrap();
+    graph.add_edge(c2_id, vec![merge_id]).unwrap();
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph.get_results::<u64>().get(&merge_id).unwrap().clone().unwrap()
+}
+
+async fn run_dagrs_cpu_chain_spawn_blocking(steps: usize) -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let src = DagrsNode::with_action("dr_src".to_string(), dr::CpuSourceBlocking(FIB_N), &mut table);
+    let src_id = src.id();
+    graph.add_node(src).unwrap();
+
+    let mut prev = src_id;
+    for i in 0..steps {
+        let node = DagrsNode::with_action(format!("dr_sb_step_{i}"), dr::CpuStepBlocking(FIB_N), &mut table);
+        let node_id = node.id();
+        graph.add_node(node).unwrap();
+        graph.add_edge(prev, vec![node_id]).unwrap();
+        prev = node_id;
+    }
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph.get_results::<u64>().get(&prev).unwrap().clone().unwrap()
+}
+
+async fn run_dagrs_io_chain(steps: usize) -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let src = DagrsNode::with_action("dr_io_src".to_string(), dr::IoSource(SLEEP_MS), &mut table);
+    let src_id = src.id();
+    graph.add_node(src).unwrap();
+
+    let mut prev = src_id;
+    for i in 0..steps {
+        let node = DagrsNode::with_action(format!("dr_io_step_{i}"), dr::IoStep(SLEEP_MS), &mut table);
+        let node_id = node.id();
+        graph.add_node(node).unwrap();
+        graph.add_edge(prev, vec![node_id]).unwrap();
+        prev = node_id;
+    }
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph.get_results::<u64>().get(&prev).unwrap().clone().unwrap()
+}
+
+async fn run_dagrs_mixed_alternating_chain(steps: usize) -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let src = DagrsNode::with_action(
+        "dr_ma_src".to_string(),
+        dr::MixedSource { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+        &mut table,
+    );
+    let src_id = src.id();
+    graph.add_node(src).unwrap();
+
+    let mut prev = src_id;
+    for i in 0..steps {
+        let node = DagrsNode::with_action(
+            format!("dr_ma_step_{i}"),
+            dr::MixedStep { fib_n: FIB_N, sleep_ms: SLEEP_MS },
+            &mut table,
+        );
+        let node_id = node.id();
+        graph.add_node(node).unwrap();
+        graph.add_edge(prev, vec![node_id]).unwrap();
+        prev = node_id;
+    }
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph.get_results::<u64>().get(&prev).unwrap().clone().unwrap()
+}
+
+async fn run_dagrs_complex_payload_chain(steps: usize) -> u64 {
+    let mut table = DagrsNodeTable::default();
+    let mut graph = DagrsGraph::new();
+
+    let src = DagrsNode::with_action(
+        "dr_cplx_src".to_string(),
+        dr::ComplexSource { seed: 42, len: COMPLEX_PAYLOAD_BYTES },
+        &mut table,
+    );
+    let src_id = src.id();
+    graph.add_node(src).unwrap();
+
+    let mut prev = src_id;
+    for i in 0..steps {
+        let node = DagrsNode::with_action(
+            format!("dr_cplx_step_{i}"),
+            dr::ComplexStep { salt: (i + 1) as u8 },
+            &mut table,
+        );
+        let node_id = node.id();
+        graph.add_node(node).unwrap();
+        graph.add_edge(prev, vec![node_id]).unwrap();
+        prev = node_id;
+    }
+
+    let score = DagrsNode::with_action("dr_cplx_score".to_string(), dr::ComplexScore, &mut table);
+    let score_id = score.id();
+    graph.add_node(score).unwrap();
+    graph.add_edge(prev, vec![score_id]).unwrap();
+
+    graph.set_env(DagrsEnvVar::new(table));
+    graph.async_start().await.unwrap();
+
+    *graph.get_results::<u64>().get(&score_id).unwrap().clone().unwrap()
+}
+
 // =========================================================================
 // Constants — tune for your machine
 // =========================================================================
@@ -911,11 +1614,10 @@ async fn bench_cpu_chain() {
     print_cpu_stability_hint();
 
     for n in [5usize, 10, 20] {
-        let ((tf_phase, tf_val), (dx_phase, dx_val), (bl_phase, bl_val)) = bench_three_split_with_value(
+        let ((tf_ms, tf_val), (dx_ms, dx_val), (dr_ms, dr_val), (bl_ms, bl_val)) = bench_four_with_value(
             BENCH_WARMUP,
             BENCH_REPEAT,
             || async {
-                let build_t0 = Instant::now();
                 let mut flow = Flow::new();
                 let mut prev = flow.commit_source_task("src", CpuSource(FIB_N));
                 for i in 0..n {
@@ -923,33 +1625,19 @@ async fn bench_cpu_chain() {
                         .commit_task(format!("s{i}"), CpuStep(FIB_N))
                         .with_dependencies(prev);
                 }
-                let build_ms = build_t0.elapsed().as_secs_f64() * 1000.0;
-
-                let exec_t0 = Instant::now();
-                let out = flow.run(prev).await.unwrap();
-                let exec_ms = exec_t0.elapsed().as_secs_f64() * 1000.0;
-                ((build_ms, exec_ms), out)
+                flow.run(prev).await.unwrap()
             },
             || async {
-                let build_t0 = Instant::now();
                 let dag = DagRunner::new();
                 let mut dprev: TaskHandle<u64> = (&dag.add_task(dx::CpuSource(FIB_N))).into();
                 for _ in 0..n {
                     dprev = dag.add_task(dx::CpuStep(FIB_N)).depends_on(&dprev);
                 }
-                let build_ms = build_t0.elapsed().as_secs_f64() * 1000.0;
-
-                let exec_t0 = Instant::now();
                 dag.run(|fut| { tokio::spawn(fut); }).await.unwrap();
-                let out = dag.get(dprev).unwrap();
-                let exec_ms = exec_t0.elapsed().as_secs_f64() * 1000.0;
-                ((build_ms, exec_ms), out)
+                dag.get(dprev).unwrap()
             },
+            || async { run_dagrs_cpu_chain(n).await },
             || async {
-                let build_t0 = Instant::now();
-                let build_ms = build_t0.elapsed().as_secs_f64() * 1000.0;
-
-                let exec_t0 = Instant::now();
                 let mut val = fib(FIB_N);
                 for _ in 0..n {
                     let v = val;
@@ -957,26 +1645,15 @@ async fn bench_cpu_chain() {
                         .await
                         .unwrap();
                 }
-                let exec_ms = exec_t0.elapsed().as_secs_f64() * 1000.0;
-                ((build_ms, exec_ms), val)
+                val
             },
         )
         .await;
 
-        assert_eq!(tf_val, bl_val);
-        assert_eq!(dx_val, bl_val);
-        row3(
-            &format!("chain len={n}"),
-            tf_phase.total,
-            dx_phase.total,
-            bl_phase.total,
-        );
-        row3_phase(
-            &format!("chain len={n} (build/exec split)"),
-            &tf_phase,
-            &dx_phase,
-            &bl_phase,
-        );
+        assert_eq!(tf_val, bl_val, "taskflow output mismatch at n={n}");
+        assert_eq!(dx_val, bl_val, "dagx output mismatch at n={n}");
+        assert_eq!(dr_val, bl_val, "dagrs output mismatch at n={n}");
+        row4(&format!("steps={n}"), tf_ms, dx_ms, dr_ms, bl_ms);
     }
 }
 
@@ -996,11 +1673,10 @@ async fn bench_cpu_fan_out() {
     header(&format!("CPU: Fan-out (1→6) + Tree Reduce  (fib({FIB_N}))"));
     print_cpu_stability_hint();
 
-    let ((tf_phase, tf_val), (dx_phase, dx_val), (bl_phase, bl_val)) = bench_three_split_with_value(
+    let ((tf_ms, tf_val), (dx_ms, dx_val), (dr_ms, dr_val), (bl_ms, bl_val)) = bench_four_with_value(
         BENCH_WARMUP,
         BENCH_REPEAT,
         || async {
-            let build_t0 = Instant::now();
             let mut flow = Flow::new();
             let s = flow.commit_source_task("src", CpuSource(FIB_N));
             let p1 = flow.commit_task("p1", CpuStep(FIB_N)).with_dependencies(dup(&s));
@@ -1013,15 +1689,9 @@ async fn bench_cpu_fan_out() {
             let a2 = flow.commit_task("a2", CpuAdd2).with_dependencies((p3, p4));
             let a3 = flow.commit_task("a3", CpuAdd2).with_dependencies((p5, p6));
             let fin = flow.commit_task("fin", CpuAdd3).with_dependencies((a1, a2, a3));
-            let build_ms = build_t0.elapsed().as_secs_f64() * 1000.0;
-
-            let exec_t0 = Instant::now();
-            let out = flow.run(fin).await.unwrap();
-            let exec_ms = exec_t0.elapsed().as_secs_f64() * 1000.0;
-            ((build_ms, exec_ms), out)
+            flow.run(fin).await.unwrap()
         },
         || async {
-            let build_t0 = Instant::now();
             let dag = DagRunner::new();
             let s = dag.add_task(dx::CpuSource(FIB_N));
             let p1 = dag.add_task(dx::CpuStep(FIB_N)).depends_on(&s);
@@ -1034,19 +1704,11 @@ async fn bench_cpu_fan_out() {
             let a2 = dag.add_task(dx::CpuAdd2).depends_on((&p3, &p4));
             let a3 = dag.add_task(dx::CpuAdd2).depends_on((&p5, &p6));
             let fin = dag.add_task(dx::CpuAdd3).depends_on((&a1, &a2, &a3));
-            let build_ms = build_t0.elapsed().as_secs_f64() * 1000.0;
-
-            let exec_t0 = Instant::now();
             dag.run(|fut| { tokio::spawn(fut); }).await.unwrap();
-            let out = dag.get(fin).unwrap();
-            let exec_ms = exec_t0.elapsed().as_secs_f64() * 1000.0;
-            ((build_ms, exec_ms), out)
+            dag.get(fin).unwrap()
         },
+        || async { run_dagrs_cpu_fan_out().await },
         || async {
-            let build_t0 = Instant::now();
-            let build_ms = build_t0.elapsed().as_secs_f64() * 1000.0;
-
-            let exec_t0 = Instant::now();
             let sv = fib(FIB_N);
             let handles: Vec<_> = (0..6)
                 .map(|_| {
@@ -1062,27 +1724,15 @@ async fn bench_cpu_fan_out() {
             let a1 = vals[0].wrapping_add(vals[1]);
             let a2 = vals[2].wrapping_add(vals[3]);
             let a3 = vals[4].wrapping_add(vals[5]);
-            let out = a1.wrapping_add(a2).wrapping_add(a3);
-            let exec_ms = exec_t0.elapsed().as_secs_f64() * 1000.0;
-            ((build_ms, exec_ms), out)
+            a1.wrapping_add(a2).wrapping_add(a3)
         },
     )
     .await;
 
-    assert_eq!(tf_val, bl_val);
-    assert_eq!(dx_val, bl_val);
-    row3(
-        "fan-out=6, tree-reduce",
-        tf_phase.total,
-        dx_phase.total,
-        bl_phase.total,
-    );
-    row3_phase(
-        "fan-out=6, tree-reduce (build/exec split)",
-        &tf_phase,
-        &dx_phase,
-        &bl_phase,
-    );
+    assert_eq!(tf_val, bl_val, "taskflow output mismatch");
+    assert_eq!(dx_val, bl_val, "dagx output mismatch");
+    assert_eq!(dr_val, bl_val, "dagrs output mismatch");
+    row4("fan-out=6, tree-reduce", tf_ms, dx_ms, dr_ms, bl_ms);
 }
 
 /// Diamond pattern: two independent paths from two sources converge.
@@ -1098,7 +1748,7 @@ async fn bench_cpu_fan_out() {
 async fn bench_cpu_diamond() {
     header(&format!("CPU: Diamond  (fib({FIB_N}))"));
 
-    let ((tf_ms, tf_val), (dx_ms, dx_val), (bl_ms, bl_val)) = bench_three_with_value(
+    let ((tf_ms, tf_val), (dx_ms, dx_val), (dr_ms, dr_val), (bl_ms, bl_val)) = bench_four_with_value(
         BENCH_WARMUP,
         BENCH_REPEAT,
         || async {
@@ -1120,6 +1770,7 @@ async fn bench_cpu_diamond() {
             dag.run(|fut| { tokio::spawn(fut); }).await.unwrap();
             dag.get(merge).unwrap()
         },
+        || async { run_dagrs_cpu_diamond().await },
         || async {
             let (v1, v2) = tokio::join!(
                 tokio::spawn(async { fib(FIB_N) }),
@@ -1133,9 +1784,10 @@ async fn bench_cpu_diamond() {
     )
     .await;
 
-    assert_eq!(tf_val, bl_val);
-    assert_eq!(dx_val, bl_val);
-    row3("diamond (2 paths)", tf_ms, dx_ms, bl_ms);
+    assert_eq!(tf_val, bl_val, "taskflow output mismatch");
+    assert_eq!(dx_val, bl_val, "dagx output mismatch");
+    assert_eq!(dr_val, bl_val, "dagrs output mismatch");
+    row4("diamond (2 paths)", tf_ms, dx_ms, dr_ms, bl_ms);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1144,7 +1796,7 @@ async fn bench_cpu_chain_spawn_blocking() {
     print_cpu_stability_hint();
 
     for n in [5usize, 10, 20] {
-        let ((tf_ms, tf_val), (dx_ms, dx_val), (bl_ms, bl_val)) = bench_three_with_value(
+        let ((tf_ms, tf_val), (dx_ms, dx_val), (dr_ms, dr_val), (bl_ms, bl_val)) = bench_four_with_value(
             BENCH_WARMUP,
             BENCH_REPEAT,
             || async {
@@ -1166,6 +1818,7 @@ async fn bench_cpu_chain_spawn_blocking() {
                 dag.run(|fut| { tokio::spawn(fut); }).await.unwrap();
                 dag.get(dprev).unwrap()
             },
+            || async { run_dagrs_cpu_chain_spawn_blocking(n).await },
             || async {
                 let mut val = tokio::task::spawn_blocking(move || fib(FIB_N)).await.unwrap();
                 for _ in 0..n {
@@ -1179,9 +1832,10 @@ async fn bench_cpu_chain_spawn_blocking() {
         )
         .await;
 
-        assert_eq!(tf_val, bl_val);
-        assert_eq!(dx_val, bl_val);
-        row3(&format!("chain len={n}"), tf_ms, dx_ms, bl_ms);
+        assert_eq!(tf_val, bl_val, "taskflow output mismatch at n={n}");
+        assert_eq!(dx_val, bl_val, "dagx output mismatch at n={n}");
+        assert_eq!(dr_val, bl_val, "dagrs output mismatch at n={n}");
+        row4(&format!("chain len={n}"), tf_ms, dx_ms, dr_ms, bl_ms);
     }
 }
 
@@ -1260,7 +1914,7 @@ async fn bench_io_chain() {
     header(&format!("IO: Linear Chain  (sleep {SLEEP_MS}ms per task)"));
 
     for n in [5usize, 10, 20] {
-        let (tf_ms, dx_ms, bl_ms) = bench_three(
+        let ((tf_ms, _tf_val), (dx_ms, _dx_val), (dr_ms, _dr_val), (bl_ms, _bl_val)) = bench_four_with_value(
             BENCH_WARMUP,
             BENCH_REPEAT,
             || async {
@@ -1271,7 +1925,7 @@ async fn bench_io_chain() {
                         .commit_task(format!("io{i}"), IoStep(SLEEP_MS))
                         .with_dependencies(prev);
                 }
-                let _tf_val = flow.run(prev).await.unwrap();
+                flow.run(prev).await.unwrap()
             },
             || async {
                 let dag = DagRunner::new();
@@ -1280,8 +1934,9 @@ async fn bench_io_chain() {
                     dprev = dag.add_task(dx::IoStep(SLEEP_MS)).depends_on(&dprev);
                 }
                 dag.run(|fut| { tokio::spawn(fut); }).await.unwrap();
-                let _dx_val: u64 = dag.get(dprev).unwrap();
+                dag.get(dprev).unwrap()
             },
+            || async { run_dagrs_io_chain(n).await },
             || async {
                 let mut val = {
                     tokio::time::sleep(Duration::from_millis(SLEEP_MS)).await;
@@ -1296,11 +1951,12 @@ async fn bench_io_chain() {
                     .await
                     .unwrap();
                 }
+                val
             },
         )
         .await;
 
-        row3(&format!("chain len={n}"), tf_ms, dx_ms, bl_ms);
+        row4(&format!("chain len={n}"), tf_ms, dx_ms, dr_ms, bl_ms);
     }
 }
 
@@ -1614,186 +2270,186 @@ async fn bench_mixed_complex_dag() {
 // =========================================================================
 
 /// Complex payload chain: source blob -> N transform steps -> checksum score.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn bench_complex_payload_chain() {
-    header(&format!(
-        "Complex Payload: Linear Chain (blob={} bytes)",
-        COMPLEX_PAYLOAD_BYTES
-    ));
+// #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// async fn bench_complex_payload_chain() {
+//     header(&format!(
+//         "Complex Payload: Linear Chain (blob={} bytes)",
+//         COMPLEX_PAYLOAD_BYTES
+//     ));
 
-    for n in [3usize, 6, 10] {
-        let ((tf_ms, tf_val), (dx_ms, dx_val), (bl_ms, bl_val)) = bench_three_with_value(
-            BENCH_WARMUP,
-            BENCH_REPEAT,
-            || async {
-                let mut flow = Flow::new();
-                let mut prev = flow.commit_source_task(
-                    "blob_src",
-                    ComplexSource {
-                        seed: 7,
-                        len: COMPLEX_PAYLOAD_BYTES,
-                    },
-                );
-                for i in 0..n {
-                    prev = flow
-                        .commit_task(
-                            format!("blob_step_{i}"),
-                            ComplexStep {
-                                salt: (i as u8).wrapping_add(13),
-                            },
-                        )
-                        .with_dependencies(prev);
-                }
-                let score = flow.commit_task("blob_score", ComplexScore).with_dependencies(prev);
-                flow.run(score).await.unwrap()
-            },
-            || async {
-                let dag = DagRunner::new();
-                let mut prev: TaskHandle<ComplexPayload> = (&dag.add_task(dx::ComplexSource {
-                    seed: 7,
-                    len: COMPLEX_PAYLOAD_BYTES,
-                }))
-                    .into();
-                for i in 0..n {
-                    prev = dag
-                        .add_task(dx::ComplexStep {
-                            salt: (i as u8).wrapping_add(13),
-                        })
-                        .depends_on(&prev);
-                }
-                let score = dag.add_task(dx::ComplexScore).depends_on(&prev);
-                dag.run(|fut| {
-                    tokio::spawn(fut);
-                })
-                .await
-                .unwrap();
-                dag.get(score).unwrap()
-            },
-            || async {
-                let mut payload = make_complex_payload(7, COMPLEX_PAYLOAD_BYTES);
-                for i in 0..n {
-                    payload = mutate_complex_payload(&payload, (i as u8).wrapping_add(13));
-                }
-                complex_payload_score(&payload)
-            },
-        )
-        .await;
+//     for n in [3usize, 6, 10] {
+//         let ((tf_ms, tf_val), (dx_ms, dx_val), (bl_ms, bl_val)) = bench_three_with_value(
+//             BENCH_WARMUP,
+//             BENCH_REPEAT,
+//             || async {
+//                 let mut flow = Flow::new();
+//                 let mut prev = flow.commit_source_task(
+//                     "blob_src",
+//                     ComplexSource {
+//                         seed: 7,
+//                         len: COMPLEX_PAYLOAD_BYTES,
+//                     },
+//                 );
+//                 for i in 0..n {
+//                     prev = flow
+//                         .commit_task(
+//                             format!("blob_step_{i}"),
+//                             ComplexStep {
+//                                 salt: (i as u8).wrapping_add(13),
+//                             },
+//                         )
+//                         .with_dependencies(prev);
+//                 }
+//                 let score = flow.commit_task("blob_score", ComplexScore).with_dependencies(prev);
+//                 flow.run(score).await.unwrap()
+//             },
+//             || async {
+//                 let dag = DagRunner::new();
+//                 let mut prev: TaskHandle<ComplexPayload> = (&dag.add_task(dx::ComplexSource {
+//                     seed: 7,
+//                     len: COMPLEX_PAYLOAD_BYTES,
+//                 }))
+//                     .into();
+//                 for i in 0..n {
+//                     prev = dag
+//                         .add_task(dx::ComplexStep {
+//                             salt: (i as u8).wrapping_add(13),
+//                         })
+//                         .depends_on(&prev);
+//                 }
+//                 let score = dag.add_task(dx::ComplexScore).depends_on(&prev);
+//                 dag.run(|fut| {
+//                     tokio::spawn(fut);
+//                 })
+//                 .await
+//                 .unwrap();
+//                 dag.get(score).unwrap()
+//             },
+//             || async {
+//                 let mut payload = make_complex_payload(7, COMPLEX_PAYLOAD_BYTES);
+//                 for i in 0..n {
+//                     payload = mutate_complex_payload(&payload, (i as u8).wrapping_add(13));
+//                 }
+//                 complex_payload_score(&payload)
+//             },
+//         )
+//         .await;
 
-        assert_eq!(tf_val, bl_val);
-        assert_eq!(dx_val, bl_val);
-        row3(&format!("blob chain len={n}"), tf_ms, dx_ms, bl_ms);
-    }
-}
+//         assert_eq!(tf_val, bl_val);
+//         assert_eq!(dx_val, bl_val);
+//         row3(&format!("blob chain len={n}"), tf_ms, dx_ms, bl_ms);
+//     }
+// }
 
-/// Complex payload fan-out: one large blob fan-outs to 6 branches, then merges to final score.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn bench_complex_payload_fan_out() {
-    header(&format!(
-        "Complex Payload: Fan-out + Merge (blob={} bytes)",
-        COMPLEX_PAYLOAD_BYTES
-    ));
+// /// Complex payload fan-out: one large blob fan-outs to 6 branches, then merges to final score.
+// #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// async fn bench_complex_payload_fan_out() {
+//     header(&format!(
+//         "Complex Payload: Fan-out + Merge (blob={} bytes)",
+//         COMPLEX_PAYLOAD_BYTES
+//     ));
 
-    let ((tf_ms, tf_val), (dx_ms, dx_val), (bl_ms, bl_val)) = bench_three_with_value(
-        BENCH_WARMUP,
-        BENCH_REPEAT,
-        || async {
-            let mut flow = Flow::new();
-            let s = flow.commit_source_task(
-                "blob_src",
-                ComplexSource {
-                    seed: 11,
-                    len: COMPLEX_PAYLOAD_BYTES,
-                },
-            );
+//     let ((tf_ms, tf_val), (dx_ms, dx_val), (bl_ms, bl_val)) = bench_three_with_value(
+//         BENCH_WARMUP,
+//         BENCH_REPEAT,
+//         || async {
+//             let mut flow = Flow::new();
+//             let s = flow.commit_source_task(
+//                 "blob_src",
+//                 ComplexSource {
+//                     seed: 11,
+//                     len: COMPLEX_PAYLOAD_BYTES,
+//                 },
+//             );
 
-            let p1 = flow
-                .commit_task("p1", ComplexStep { salt: 1 })
-                .with_dependencies(dup(&s));
-            let p2 = flow
-                .commit_task("p2", ComplexStep { salt: 2 })
-                .with_dependencies(dup(&s));
-            let p3 = flow
-                .commit_task("p3", ComplexStep { salt: 3 })
-                .with_dependencies(dup(&s));
-            let p4 = flow
-                .commit_task("p4", ComplexStep { salt: 4 })
-                .with_dependencies(dup(&s));
-            let p5 = flow
-                .commit_task("p5", ComplexStep { salt: 5 })
-                .with_dependencies(dup(&s));
-            let p6 = flow
-                .commit_task("p6", ComplexStep { salt: 6 })
-                .with_dependencies(s);
+//             let p1 = flow
+//                 .commit_task("p1", ComplexStep { salt: 1 })
+//                 .with_dependencies(dup(&s));
+//             let p2 = flow
+//                 .commit_task("p2", ComplexStep { salt: 2 })
+//                 .with_dependencies(dup(&s));
+//             let p3 = flow
+//                 .commit_task("p3", ComplexStep { salt: 3 })
+//                 .with_dependencies(dup(&s));
+//             let p4 = flow
+//                 .commit_task("p4", ComplexStep { salt: 4 })
+//                 .with_dependencies(dup(&s));
+//             let p5 = flow
+//                 .commit_task("p5", ComplexStep { salt: 5 })
+//                 .with_dependencies(dup(&s));
+//             let p6 = flow
+//                 .commit_task("p6", ComplexStep { salt: 6 })
+//                 .with_dependencies(s);
 
-            let m1 = flow.commit_task("m1", ComplexMerge2).with_dependencies((p1, p2));
-            let m2 = flow.commit_task("m2", ComplexMerge2).with_dependencies((p3, p4));
-            let m3 = flow.commit_task("m3", ComplexMerge2).with_dependencies((p5, p6));
-            let m12 = flow.commit_task("m12", ComplexMerge2).with_dependencies((m1, m2));
-            let fin_payload = flow
-                .commit_task("mfin", ComplexMerge2)
-                .with_dependencies((m12, m3));
-            let score = flow
-                .commit_task("score", ComplexScore)
-                .with_dependencies(fin_payload);
-            flow.run(score).await.unwrap()
-        },
-        || async {
-            let dag = DagRunner::new();
-            let s = dag.add_task(dx::ComplexSource {
-                seed: 11,
-                len: COMPLEX_PAYLOAD_BYTES,
-            });
-            let p1 = dag.add_task(dx::ComplexStep { salt: 1 }).depends_on(&s);
-            let p2 = dag.add_task(dx::ComplexStep { salt: 2 }).depends_on(&s);
-            let p3 = dag.add_task(dx::ComplexStep { salt: 3 }).depends_on(&s);
-            let p4 = dag.add_task(dx::ComplexStep { salt: 4 }).depends_on(&s);
-            let p5 = dag.add_task(dx::ComplexStep { salt: 5 }).depends_on(&s);
-            let p6 = dag.add_task(dx::ComplexStep { salt: 6 }).depends_on(&s);
+//             let m1 = flow.commit_task("m1", ComplexMerge2).with_dependencies((p1, p2));
+//             let m2 = flow.commit_task("m2", ComplexMerge2).with_dependencies((p3, p4));
+//             let m3 = flow.commit_task("m3", ComplexMerge2).with_dependencies((p5, p6));
+//             let m12 = flow.commit_task("m12", ComplexMerge2).with_dependencies((m1, m2));
+//             let fin_payload = flow
+//                 .commit_task("mfin", ComplexMerge2)
+//                 .with_dependencies((m12, m3));
+//             let score = flow
+//                 .commit_task("score", ComplexScore)
+//                 .with_dependencies(fin_payload);
+//             flow.run(score).await.unwrap()
+//         },
+//         || async {
+//             let dag = DagRunner::new();
+//             let s = dag.add_task(dx::ComplexSource {
+//                 seed: 11,
+//                 len: COMPLEX_PAYLOAD_BYTES,
+//             });
+//             let p1 = dag.add_task(dx::ComplexStep { salt: 1 }).depends_on(&s);
+//             let p2 = dag.add_task(dx::ComplexStep { salt: 2 }).depends_on(&s);
+//             let p3 = dag.add_task(dx::ComplexStep { salt: 3 }).depends_on(&s);
+//             let p4 = dag.add_task(dx::ComplexStep { salt: 4 }).depends_on(&s);
+//             let p5 = dag.add_task(dx::ComplexStep { salt: 5 }).depends_on(&s);
+//             let p6 = dag.add_task(dx::ComplexStep { salt: 6 }).depends_on(&s);
 
-            let m1 = dag.add_task(dx::ComplexMerge2).depends_on((&p1, &p2));
-            let m2 = dag.add_task(dx::ComplexMerge2).depends_on((&p3, &p4));
-            let m3 = dag.add_task(dx::ComplexMerge2).depends_on((&p5, &p6));
-            let m12 = dag.add_task(dx::ComplexMerge2).depends_on((&m1, &m2));
-            let fin_payload = dag.add_task(dx::ComplexMerge2).depends_on((&m12, &m3));
-            let score = dag.add_task(dx::ComplexScore).depends_on(&fin_payload);
+//             let m1 = dag.add_task(dx::ComplexMerge2).depends_on((&p1, &p2));
+//             let m2 = dag.add_task(dx::ComplexMerge2).depends_on((&p3, &p4));
+//             let m3 = dag.add_task(dx::ComplexMerge2).depends_on((&p5, &p6));
+//             let m12 = dag.add_task(dx::ComplexMerge2).depends_on((&m1, &m2));
+//             let fin_payload = dag.add_task(dx::ComplexMerge2).depends_on((&m12, &m3));
+//             let score = dag.add_task(dx::ComplexScore).depends_on(&fin_payload);
 
-            dag.run(|fut| {
-                tokio::spawn(fut);
-            })
-            .await
-            .unwrap();
-            dag.get(score).unwrap()
-        },
-        || async {
-            let src = std::sync::Arc::new(make_complex_payload(11, COMPLEX_PAYLOAD_BYTES));
-            let handles: Vec<_> = (1u8..=6)
-                .map(|salt| {
-                    let src = src.clone();
-                    tokio::spawn(async move { mutate_complex_payload(src.as_ref(), salt) })
-                })
-                .collect();
+//             dag.run(|fut| {
+//                 tokio::spawn(fut);
+//             })
+//             .await
+//             .unwrap();
+//             dag.get(score).unwrap()
+//         },
+//         || async {
+//             let src = std::sync::Arc::new(make_complex_payload(11, COMPLEX_PAYLOAD_BYTES));
+//             let handles: Vec<_> = (1u8..=6)
+//                 .map(|salt| {
+//                     let src = src.clone();
+//                     tokio::spawn(async move { mutate_complex_payload(src.as_ref(), salt) })
+//                 })
+//                 .collect();
 
-            let vals: Vec<_> = futures::future::join_all(handles)
-                .await
+//             let vals: Vec<_> = futures::future::join_all(handles)
+//                 .await
 
-                .into_iter()
-                .map(|r| r.unwrap())
-                .collect();
+//                 .into_iter()
+//                 .map(|r| r.unwrap())
+//                 .collect();
 
-            let m1 = merge_complex_payload(&vals[0], &vals[1]);
-            let m2 = merge_complex_payload(&vals[2], &vals[3]);
-            let m3 = merge_complex_payload(&vals[4], &vals[5]);
-            let m12 = merge_complex_payload(&m1, &m2);
-            let fin = merge_complex_payload(&m12, &m3);
-            complex_payload_score(&fin)
-        },
-    )
-    .await;
+//             let m1 = merge_complex_payload(&vals[0], &vals[1]);
+//             let m2 = merge_complex_payload(&vals[2], &vals[3]);
+//             let m3 = merge_complex_payload(&vals[4], &vals[5]);
+//             let m12 = merge_complex_payload(&m1, &m2);
+//             let fin = merge_complex_payload(&m12, &m3);
+//             complex_payload_score(&fin)
+//         },
+//     )
+//     .await;
 
-    assert_eq!(tf_val, bl_val);
-    assert_eq!(dx_val, bl_val);
-    row3("blob fan-out=6 + merge", tf_ms, dx_ms, bl_ms);
-}
+//     assert_eq!(tf_val, bl_val);
+//     assert_eq!(dx_val, bl_val);
+//     row3("blob fan-out=6 + merge", tf_ms, dx_ms, bl_ms);
+// }
 
 // =========================================================================
 // Stress tests (large-scale, run with --ignored)
@@ -1976,3 +2632,4 @@ async fn bench_stress_wide_dag() {
 
     row("22-task 5-layer DAG", tf_ms, bl_ms);
 }
+
