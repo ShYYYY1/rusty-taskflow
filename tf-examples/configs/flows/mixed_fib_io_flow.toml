@@ -1,0 +1,34 @@
+[flow]
+name = "mixed_fib_io"
+
+[[flow.source]]
+name = "FibInput"
+description = "seed input for fib"
+task_type = "Source"
+dependencies = []
+output = "fib_n"
+builder = "crate::config_tasks::FibInput::new()"
+
+[[flow.processor]]
+name = "Fib"
+description = "calculate fib by sync task"
+task_type = "Processor"
+dependencies = ["fib_n"]
+output = "fib_value"
+builder = "crate::config_tasks::Fib::new()"
+
+[[flow.processor]]
+name = "AsyncPersistFib"
+description = "persist fib result to file by async task"
+task_type = "Processor"
+dependencies = ["fib_value"]
+output = "persisted_fib"
+builder = "crate::config_tasks::AsyncPersistFib::new()"
+
+[flow.sink]
+name = "DoubleSink"
+description = "double final value"
+task_type = "Sink"
+dependencies = ["persisted_fib"]
+output = "mixed_fib_output"
+builder = "crate::config_tasks::DoubleSink::new()"

@@ -6,7 +6,7 @@ use std::{
 
 use crate::tf::{
     dependency::{DependencyBuilder, OutputWrapper},
-    errors::{FlowError, TaskError},
+    errors::{FlowError},
     task::TaskAdapter,
     traits::{AsyncTask, FromAnyVecDeque, InvocableTask},
 };
@@ -122,7 +122,7 @@ impl Flow {
                         .map(|deps| deps.iter().filter_map(|id| outputs.get(id).cloned()).collect())
                         .unwrap_or_default();
                     let output = task.invoke(inputs).await.map_err(|e| {
-                        FlowError::TaskExecutionError(TaskError::TaskExecutionError(task_id.0, e))
+                        FlowError::TaskExecutionError(task_id.0, e)
                     })?;
                     outputs.insert(task_id.clone(), output);
                 }
@@ -145,13 +145,13 @@ impl Flow {
                 let result = handle
                     .await
                     .map_err(|e| {
-                        FlowError::TaskExecutionError(TaskError::TaskExecutionError(
+                        FlowError::TaskExecutionError(
                             tid.clone().0,
                             e.to_string(),
-                        ))
+                        )
                     })?
                     .map_err(|e| {
-                        FlowError::TaskExecutionError(TaskError::TaskExecutionError(tid.clone().0, e))
+                        FlowError::TaskExecutionError(tid.clone().0, e)
                     })?;
                 outputs.insert(tid, result);
             }
@@ -170,17 +170,15 @@ impl Flow {
             .remove(&sink.id)
             .ok_or_else(|| FlowError::TaskNotFound(sink.id.clone().0))?;
         let typed_arc = final_arc.downcast::<Output>().map_err(|_| {
-            FlowError::TaskExecutionError(TaskError::TaskExecutionError(
-                sink.id.clone().0,
+            FlowError::TaskExecutionError(sink.id.clone().0,
                 "output type mismatch".to_string(),
-            ))
+            )
         })?;
 
         Arc::try_unwrap(typed_arc).map_err(|_| {
-            FlowError::TaskExecutionError(TaskError::TaskExecutionError(
-                sink.id.0,
-                "output Arc has multiple owners".to_string(),
-            ))
+            FlowError::TaskExecutionError(sink.id.0,
+                "output has multiple owners".to_string(),
+            )
         })
     }
 

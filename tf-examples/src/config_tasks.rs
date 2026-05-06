@@ -1,4 +1,4 @@
-use taskflow::sync_task;
+use taskflow::{async_task, sync_task};
 
 pub struct FibSource1;
 
@@ -81,5 +81,55 @@ impl Multiply {
 impl Multiply {
     fn run(self, v: &u64) ->u64 {
         self.factor * v
+    }
+}
+
+pub struct FibInput;
+
+#[sync_task(path = "::taskflow")]
+impl FibInput {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn run(self) -> u64 {
+        18
+    }
+}
+
+pub struct AsyncPersistFib;
+
+#[async_task(path = "::taskflow")]
+impl AsyncPersistFib {
+    pub fn new() -> Self {
+        Self
+    }
+
+    async fn run(self, fib: &u64) -> u64 {
+        let output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("outputs");
+        tokio::fs::create_dir_all(&output_dir)
+            .await
+            .expect("failed to create tf-examples/outputs");
+
+        let output_file = output_dir.join("mixed_fib_result.txt");
+        tokio::fs::write(&output_file, format!("fib_result={fib}\n"))
+            .await
+            .expect("failed to write mixed_fib_result.txt");
+
+        println!("AsyncPersistFib wrote {}", output_file.display());
+        *fib
+    }
+}
+
+pub struct DoubleSink;
+
+#[sync_task(path = "::taskflow")]
+impl DoubleSink {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn run(self, value: &u64) -> u64 {
+        value * 2
     }
 }

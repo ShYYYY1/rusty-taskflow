@@ -2,12 +2,6 @@ use figment::Error;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Error, Deserialize, Serialize, Debug)]
-pub enum TaskError {
-    #[error("failed to execute tid:{0}, message: {1}")]
-    TaskExecutionError(usize, String)
-}
-
 #[derive(Error, Debug)]
 pub enum FlowError {
     #[error("configuration error: {0}")]
@@ -34,6 +28,6 @@ pub enum FlowError {
     #[error("invalid flow configuration: {0}")]
     ConfigBuildError(String),
 
-    #[error(transparent)]
-    TaskExecutionError(#[from] TaskError),
+    #[error("failed to execute tid:{0}, message: {1}")]
+    TaskExecutionError(usize, String),
 }

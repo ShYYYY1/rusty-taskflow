@@ -1,4 +1,5 @@
 [flow_path]
 paths = [
     "./flows/fib_flow.toml",
+    "./flows/mixed_fib_io_flow.toml",
 ]
