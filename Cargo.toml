@@ -19,6 +19,12 @@ taskflow-build = { path = "taskflow-build" }
 name = "taskflow"
 version = "0.1.0"
 edition = "2024"
+description = "A type-safe async DAG task flow framework"
+license = "MIT"
+repository = "https://github.com/ShYYYY1/rusty-taskflow"
+readme = "README.md"
+keywords = ["async", "dag", "taskflow"]
+categories = ["concurrency"]
 
 [dependencies]
 taskflow-macros = { workspace = true }
