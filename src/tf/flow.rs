@@ -10,7 +10,7 @@ use crate::tf::{
     dependency::{DependencyBuilder, OutputWrapper},
     errors::{FlowError},
     task::TaskAdapter,
-    traits::{AsyncTask, FromAnyVecDeque, InvocableTask},
+    traits::{AsyncTask, FromAnyIter, InvocableTask},
 };
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
@@ -49,7 +49,7 @@ impl Flow {
         task: impl AsyncTask<Input = I, Output = O> + Send + 'static,
     ) -> DependencyBuilder<'flow, I, O>
     where
-        I: FromAnyVecDeque,
+        I: FromAnyIter,
         O: Send + Sync + 'static,
     {
         let task_id = TaskId(self.tasks.len());
@@ -67,7 +67,7 @@ impl Flow {
         task: impl AsyncTask<Input = I, Output = O> + Send + 'static,
     ) -> OutputWrapper<O>
     where
-        I: FromAnyVecDeque,
+        I: FromAnyIter,
         O: Send + Sync + 'static,
     {
         let task_id = TaskId(self.tasks.len());
@@ -94,21 +94,20 @@ impl Flow {
     async fn execute(&mut self) -> Result<HashMap<TaskId, Arc<dyn Any + Send + Sync>>, FlowError> {
         let layers = self.get_topological_layers()?;
         let mut outputs: HashMap<TaskId, Arc<dyn Any + Send + Sync>> = HashMap::new();
-
+        let empty: &[_] = &[];
         for layer in layers {
             let mut handles = Vec::new();
 
             if layer.len() == 1 {
                 let task_id = &layer[0];
                 if let Some(task) = self.tasks[task_id.0].take() {
-                    let inputs: VecDeque<Arc<dyn Any + Send + Sync>> = self
-                        .rev_edges
-                        .get(task_id)
-                        .map(|deps| deps.iter().filter_map(|id| outputs.get(id).cloned()).collect())
-                        .unwrap_or_default();
-                    let output = task.invoke(inputs).await.map_err(|e| {
-                        FlowError::TaskExecutionError(task_id.0, e)
-                    })?;
+                    let inputs = self
+                        .rev_edges.get(task_id).map(|v| v.as_slice())
+                        .unwrap_or(empty);
+                    let mut inputs_iter = inputs
+                        .iter()
+                        .filter_map(|v| outputs.get(v).cloned());
+                    let output = task.invoke(&mut inputs_iter).await.map_err(|e| e)?;
                     outputs.insert(task_id.clone(), output);
                 }
                 continue;
@@ -116,12 +115,13 @@ impl Flow {
 
             for task_id in &layer {
                 if let Some(task) = self.tasks[task_id.0].take() {
-                    let inputs: VecDeque<Arc<dyn Any + Send + Sync>> = self
-                        .rev_edges
-                        .get(task_id)
-                        .map(|deps| deps.iter().filter_map(|id| outputs.get(id).cloned()).collect())
-                        .unwrap_or_default();
-                    let fut = task.invoke(inputs);
+                    let inputs = self
+                        .rev_edges.get(task_id).map(|v| v.as_slice())
+                        .unwrap_or(empty);
+                    let mut inputs_iter = inputs
+                        .iter()
+                        .filter_map(|v| outputs.get(v).cloned());
+                    let fut = task.invoke(&mut inputs_iter);
                     handles.push((task_id.clone(), tokio::spawn(fut)));
                 }
             }
@@ -135,9 +135,7 @@ impl Flow {
                             e.to_string(),
                         )
                     })?
-                    .map_err(|e| {
-                        FlowError::TaskExecutionError(tid.clone().0, e)
-                    })?;
+                    .map_err(|e| e)?;
                 outputs.insert(tid, result);
             }
         }
