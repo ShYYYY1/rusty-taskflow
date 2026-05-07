@@ -88,7 +88,7 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::{collections::VecDeque, time::Duration};
+    use std::{time::Duration};
 
     use taskflow_macros::{async_task, sync_task};
 
