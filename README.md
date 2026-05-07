@@ -4,6 +4,10 @@
 
 ---
 
+> **Status: Early Development** — This project is under active development. The API is functional but may change. Use in production at your own risk.
+
+---
+
 ## English
 
 A high-performance, type-safe DAG (Directed Acyclic Graph) execution framework for Rust with configuration-driven flow definition.
@@ -118,6 +122,8 @@ tf-examples/
 ---
 
 ## 中文
+
+> **状态：早期开发中** — 本项目仍在积极开发阶段，API 可正常使用但可能发生变更，生产环境使用需自行评估风险。
 
 高性能、类型安全的 Rust DAG（有向无环图）执行框架，支持配置驱动的流程定义。
 

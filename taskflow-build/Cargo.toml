@@ -2,6 +2,11 @@
 name = "taskflow-build"
 version = "0.1.0"
 edition = "2024"
+description = "Build-time code generator for the taskflow DAG framework"
+license = "MIT"
+repository = "https://github.com/ShYYYY1/rusty-taskflow"
+keywords = ["async", "dag", "taskflow", "build-script"]
+categories = ["development-tools"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

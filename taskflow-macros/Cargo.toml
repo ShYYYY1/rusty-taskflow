@@ -2,6 +2,11 @@
 name = "taskflow-macros"
 version = "0.1.0"
 edition = "2024"
+description = "Procedural macros for the taskflow DAG framework"
+license = "MIT"
+repository = "https://github.com/ShYYYY1/rusty-taskflow"
+keywords = ["async", "dag", "taskflow", "macro"]
+categories = ["rust-patterns"]
 
 [lib]
 proc-macro = true
