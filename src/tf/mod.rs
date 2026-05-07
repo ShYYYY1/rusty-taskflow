@@ -9,6 +9,3 @@ pub mod traits;
 pub mod dependency;
 
 pub mod component_registry;
-
-#[cfg(test)]
-mod bench;
