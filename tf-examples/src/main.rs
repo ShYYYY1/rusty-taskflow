@@ -1,5 +1,7 @@
 mod config_tasks;
 
+use taskflow::tf::flow::Flow;
+
 // add generated .rs to compile
 include!(concat!(env!("OUT_DIR"), "/generated_typed_flows.rs"));
 
@@ -8,6 +10,24 @@ fn expect_u64(output: &std::sync::Arc<dyn std::any::Any + Send + Sync>, context:
         .downcast_ref::<u64>()
         .copied()
         .unwrap_or_else(|| panic!("{context}: unexpected sink output type, expected u64"))
+}
+
+async fn run_manual_flow() -> u64 {
+    let mut flow = Flow::new();
+
+    let left = flow.commit_source_task("FibSource1", config_tasks::FibSource1::new());
+    let right = flow.commit_source_task("FibSource2", config_tasks::FibSource2::new());
+    let merged = flow
+        .commit_task("Merger", config_tasks::Merger::new())
+        .with_dependencies((left, right));
+    let fib = flow
+        .commit_task("Fib", config_tasks::Fib::new())
+        .with_dependencies(merged);
+    let sink = flow
+        .commit_task("Multiply", config_tasks::Multiply::new())
+        .with_dependencies(fib);
+
+    flow.run(sink).await.expect("manual flow execution failed")
 }
 
 #[tokio::main]
@@ -37,4 +57,9 @@ async fn main() {
         .expect("direct path run failed");
     let direct_output = expect_u64(&direct_output_any, "run_flow_by_path");
     println!("[direct] {second_path} => {direct_output}");
+
+    // mode 3: construct graph manually in Rust code
+    let manual_output = run_manual_flow().await;
+    println!("[manual] FibSource1+FibSource2 -> Merger -> Fib -> Multiply => {manual_output}");
 }
+

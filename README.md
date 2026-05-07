@@ -19,9 +19,10 @@ A high-performance, type-safe DAG (Directed Acyclic Graph) execution framework f
 - **Unified sync/async model**: Support both `#[sync_task]` and `#[async_task]` with unified async execution
 - **Configuration-driven**: Define flows in TOML, generate type-safe code at compile time
 - **Multi-flow management**: Load and run multiple flows from a single application
-- **Two execution modes**:
+- **Three execution modes**:
   - Build flow first, execute later with `sink_id`
   - Direct execution by path
+  - Construct flow manually in Rust code via `Flow::new()`
 
 ### Performance
 
@@ -106,6 +107,26 @@ let output = flow.run_with_sink_id(sink_id).await.expect("run failed");
 let output = run_flow_by_path(path).await.expect("run failed");
 ```
 
+#### 4. Manual Flow Construction (Without TOML)
+
+```rust
+use taskflow::tf::flow::Flow;
+
+let mut flow = Flow::new();
+let left = flow.commit_source_task("FibSource1", crate::config_tasks::FibSource1::new());
+let right = flow.commit_source_task("FibSource2", crate::config_tasks::FibSource2::new());
+let merged = flow
+    .commit_task("Merger", crate::config_tasks::Merger::new())
+    .with_dependencies((left, right));
+let fib = flow
+    .commit_task("Fib", crate::config_tasks::Fib::new())
+    .with_dependencies(merged);
+let sink = flow
+    .commit_task("Multiply", crate::config_tasks::Multiply::new())
+    .with_dependencies(fib);
+let output = flow.run(sink).await.expect("manual run failed");
+```
+
 ### Project Structure
 
 ```
@@ -134,9 +155,10 @@ tf-examples/
 - **sync/async 统一模型**：同时支持 `#[sync_task]` 和 `#[async_task]`，底层统一异步执行
 - **配置驱动**：TOML 定义流程，编译期生成类型安全代码
 - **多流程管理**：单应用加载运行多个流程
-- **两种执行模式**：
+- **三种执行模式**：
   - 先构建后执行（通过 `sink_id`）
   - 按路径直接执行
+  - 通过 `Flow::new()` 在 Rust 代码中手动构图
 
 ### 性能
 
@@ -219,6 +241,26 @@ let output = flow.run_with_sink_id(sink_id).await.expect("执行失败");
 
 // 方式 B：直接按路径执行
 let output = run_flow_by_path(path).await.expect("执行失败");
+```
+
+#### 4. 手动构图（不依赖 TOML）
+
+```rust
+use taskflow::tf::flow::Flow;
+
+let mut flow = Flow::new();
+let left = flow.commit_source_task("FibSource1", crate::config_tasks::FibSource1::new());
+let right = flow.commit_source_task("FibSource2", crate::config_tasks::FibSource2::new());
+let merged = flow
+    .commit_task("Merger", crate::config_tasks::Merger::new())
+    .with_dependencies((left, right));
+let fib = flow
+    .commit_task("Fib", crate::config_tasks::Fib::new())
+    .with_dependencies(merged);
+let sink = flow
+    .commit_task("Multiply", crate::config_tasks::Multiply::new())
+    .with_dependencies(fib);
+let output = flow.run(sink).await.expect("手动执行失败");
 ```
 
 ### 项目结构
