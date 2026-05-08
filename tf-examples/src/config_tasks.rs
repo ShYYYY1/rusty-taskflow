@@ -1,4 +1,35 @@
-use taskflow::{async_task, sync_task};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use taskflow::{async_task, register_factory, register_singleton, sync_task, FlowContext};
+
+/// A singleton that lives inside the `FlowContext` and exposes a tunable
+/// multiplier that downstream tasks can read without having to receive it
+/// through the DAG.
+pub struct MultiplierConfig {
+    pub factor: u64,
+}
+
+impl MultiplierConfig {
+    pub fn new() -> Self {
+        Self { factor: 3 }
+    }
+}
+
+register_singleton!(MultiplierConfig, "multiplier_config", MultiplierConfig::new);
+
+/// A factory component: every `create_component::<RequestId>("request_id")`
+/// call returns a fresh, unique id. Demonstrates per-invocation component
+/// construction as opposed to the shared-by-reference singleton above.
+pub struct RequestId(pub u64);
+
+impl RequestId {
+    pub fn new() -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        Self(COUNTER.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+register_factory!(RequestId, "request_id", RequestId::new);
 
 pub struct FibSource1;
 
@@ -67,20 +98,35 @@ impl Fib {
     }
 }
 
-pub struct Multiply {
-    factor:u64,
-}
+/// Uses the shared `MultiplierConfig` singleton from the `FlowContext` to
+/// amplify its single input, and tags the log with a fresh `RequestId` pulled
+/// from the factory. Note how the task signature declares
+/// `ctx: &FlowContext` as the first non-`self` parameter — the proc macro
+/// wires it from the scheduler automatically and does **not** treat it as a
+/// DAG input.
+pub struct Multiply;
 
 impl Multiply {
     pub fn new() -> Self {
-        Self { factor: 2 }
+        Self
     }
 }
 
 #[sync_task(path = "::taskflow")]
 impl Multiply {
-    fn run(self, v: &u64) ->u64 {
-        self.factor * v
+    fn run(self, ctx: &FlowContext, v: &u64) -> u64 {
+        let cfg = ctx
+            .get_singleton_component::<MultiplierConfig>("multiplier_config")
+            .expect("multiplier_config singleton must be registered");
+        let req = ctx
+            .create_component::<RequestId>("request_id")
+            .expect("request_id factory must be registered");
+        let result = cfg.factor * v;
+        println!(
+            "Multiply[req={}]: {} * {} = {}",
+            req.0, cfg.factor, v, result
+        );
+        result
     }
 }
 

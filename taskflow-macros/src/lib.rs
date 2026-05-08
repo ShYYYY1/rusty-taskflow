@@ -15,11 +15,48 @@ use syn::{
     Type,
 };
 
+/// Turn an inherent `impl Block { fn run(...) -> ... }` into a
+/// `SyncTask`/`AsyncTask` trait implementation for the taskflow scheduler.
+///
+/// ## Accepted `run` signatures
+///
+/// ```ignore
+/// // 1. No inputs, no context (source task).
+/// fn run(self) -> Out;
+///
+/// // 2. Only DAG inputs.
+/// fn run(self, a: &A, b: &B) -> Out;
+///
+/// // 3. With the runtime FlowContext. MUST be the first non-self parameter,
+/// //    typed as `&FlowContext` (match by trailing path segment, so any
+/// //    import alias that still names the type `FlowContext` works).
+/// fn run(self, ctx: &FlowContext, a: &A) -> Out;
+/// ```
+///
+/// DAG inputs must be shared references `&T` (the scheduler stores outputs as
+/// `Arc<T>` and hands out a borrow). Owned and `&mut` parameters are rejected.
+///
+/// ## Context injection details
+///
+/// The generated trait impl always takes `ctx: &FlowContext`. If the user did
+/// not declare one, the generated body discards it with `let _ = ctx;`. If the
+/// user did declare one, it is forwarded as the first argument to the inherent
+/// `run` call. Nothing else in the user's signature changes.
+///
+/// ## The `path = "..."` attribute
+///
+/// When the macro is used outside the taskflow crate itself, pass
+/// `path = "::taskflow"` (or the relevant re-export root) so the generated
+/// code can refer to the runtime traits. Inside the taskflow crate the
+/// default `crate` path is used.
 #[proc_macro_attribute]
 pub fn sync_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_task(attr, item, false)
 }
 
+/// Async counterpart of [`macro@sync_task`]. The `run` method must be
+/// `async fn` and all the rules about parameters (shared references, optional
+/// leading `ctx: &FlowContext`) are identical.
 #[proc_macro_attribute]
 pub fn async_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_task(attr, item, true)
@@ -84,7 +121,7 @@ fn build_task_impl(
         return Err(syn::Error::new(run_fn.sig.span(), msg));
     }
 
-    let (receiver_kind, arg_infos) = parse_signature(run_fn)?;
+    let (receiver_kind, has_ctx, arg_infos) = parse_signature(run_fn)?;
     let input_ty = build_input_type(&arg_infos);
     let output_ty = match &run_fn.sig.output {
         ReturnType::Default => {
@@ -98,7 +135,17 @@ fn build_task_impl(
 
     let destructure = build_destructure(&arg_infos);
     let call_args: Vec<_> = arg_infos.iter().map(|arg| arg.call_expr.clone()).collect();
-    let (receiver_setup, call_expr) = build_inherent_call(self_ty, receiver_kind, &call_args);
+    let (receiver_setup, call_expr) =
+        build_inherent_call(self_ty, receiver_kind, has_ctx, &call_args);
+
+    // If the user's `run` does not declare `ctx: &FlowContext`, we still must
+    // accept it in the generated trait impl — silence the unused warning with
+    // a discard binding.
+    let ctx_discard = if has_ctx {
+        quote! {}
+    } else {
+        quote! { let _ = __tf_ctx; }
+    };
 
     let trait_name = if expect_async {
         quote! { #root_path::tf::traits::AsyncTask }
@@ -110,9 +157,11 @@ fn build_task_impl(
         quote! {
             fn run(
                 self,
+                __tf_ctx: &#root_path::tf::component_registry::FlowContext,
                 input: #root_path::tf::task::TaskInput<Self::Input>,
             ) -> impl std::future::Future<Output = #root_path::tf::task::TaskOutput<Self::Output>> + Send {
                 async move {
+                    #ctx_discard
                     #destructure
                     #receiver_setup
                     #root_path::tf::task::TaskOutput(#call_expr.await)
@@ -123,8 +172,10 @@ fn build_task_impl(
         quote! {
             fn run(
                 self,
+                __tf_ctx: &#root_path::tf::component_registry::FlowContext,
                 input: #root_path::tf::task::TaskInput<Self::Input>,
             ) -> #root_path::tf::task::TaskOutput<Self::Output> {
+                #ctx_discard
                 #destructure
                 #receiver_setup
                 #root_path::tf::task::TaskOutput(#call_expr)
@@ -184,9 +235,11 @@ struct ArgInfo {
 
 fn parse_signature(
     run_fn: &ImplItemFn,
-) -> core::result::Result <(ReceiverKind, std::vec::Vec <ArgInfo>), syn::Error> {
+) -> core::result::Result <(ReceiverKind, bool, std::vec::Vec <ArgInfo>), syn::Error> {
     let mut receiver = ReceiverKind::None;
     let mut args = Vec::new();
+    let mut has_ctx = false;
+    let mut typed_arg_index: usize = 0;
 
     for arg in &run_fn.sig.inputs {
         match arg {
@@ -208,6 +261,24 @@ fn parse_signature(
                 };
 
                 let ident = pat_ident.ident.clone();
+
+                // Detect a leading `ctx: &FlowContext` argument. It must be
+                // the first non-`self` typed parameter and is routed to the
+                // runtime-provided FlowContext rather than being treated as a
+                // DAG input. Match by the trailing `FlowContext` identifier so
+                // users are free to `use ... as Foo` if they wish — but see
+                // the macro docs for the recommended convention.
+                if typed_arg_index == 0 {
+                    if let Type::Reference(r) = typed.ty.as_ref() {
+                        if r.mutability.is_none() && is_flow_context_path(r.elem.as_ref()) {
+                            has_ctx = true;
+                            typed_arg_index += 1;
+                            continue;
+                        }
+                    }
+                }
+                typed_arg_index += 1;
+
                 match typed.ty.as_ref() {
                     Type::Reference(r) if r.mutability.is_none() => {
                         let inner = (*r.elem).clone();
@@ -235,7 +306,18 @@ fn parse_signature(
         }
     }
 
-    Ok((receiver, args))
+    Ok((receiver, has_ctx, args))
+}
+
+/// Matches `FlowContext` as the final path segment. Accepts `FlowContext`,
+/// `taskflow::FlowContext`, `crate::tf::component_registry::FlowContext`, etc.
+fn is_flow_context_path(ty: &Type) -> bool {
+    if let Type::Path(p) = ty {
+        if let Some(last) = p.path.segments.last() {
+            return last.ident == "FlowContext";
+        }
+    }
+    false
 }
 
 fn build_input_type(args: &[ArgInfo]) -> proc_macro2::TokenStream {
@@ -271,38 +353,51 @@ fn build_destructure(args: &[ArgInfo]) -> proc_macro2::TokenStream {
 fn build_inherent_call(
     self_ty: &Type,
     receiver_kind: ReceiverKind,
+    has_ctx: bool,
     call_args: &[proc_macro2::TokenStream],
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    // If the user's run declared `ctx: &FlowContext`, prepend it to the
+    // argument list so it flows from the runtime into their function.
+    let ctx_arg: Vec<proc_macro2::TokenStream> = if has_ctx {
+        vec![quote! { __tf_ctx }]
+    } else {
+        vec![]
+    };
+    let all_args: Vec<proc_macro2::TokenStream> = ctx_arg
+        .into_iter()
+        .chain(call_args.iter().cloned())
+        .collect();
+
     match receiver_kind {
         ReceiverKind::None => {
-            let call = if call_args.is_empty() {
+            let call = if all_args.is_empty() {
                 quote! { <#self_ty>::run() }
             } else {
-                quote! { <#self_ty>::run(#(#call_args),*) }
+                quote! { <#self_ty>::run(#(#all_args),*) }
             };
             (quote! {}, call)
         }
         ReceiverKind::Value => {
-            let call = if call_args.is_empty() {
+            let call = if all_args.is_empty() {
                 quote! { <#self_ty>::run(self) }
             } else {
-                quote! { <#self_ty>::run(self, #(#call_args),*) }
+                quote! { <#self_ty>::run(self, #(#all_args),*) }
             };
             (quote! {}, call)
         }
         ReceiverKind::Ref => {
-            let call = if call_args.is_empty() {
+            let call = if all_args.is_empty() {
                 quote! { <#self_ty>::run(&self) }
             } else {
-                quote! { <#self_ty>::run(&self, #(#call_args),*) }
+                quote! { <#self_ty>::run(&self, #(#all_args),*) }
             };
             (quote! {}, call)
         }
         ReceiverKind::RefMut => {
-            let call = if call_args.is_empty() {
+            let call = if all_args.is_empty() {
                 quote! { <#self_ty>::run(&mut __task) }
             } else {
-                quote! { <#self_ty>::run(&mut __task, #(#call_args),*) }
+                quote! { <#self_ty>::run(&mut __task, #(#all_args),*) }
             };
             (quote! { let mut __task = self; }, call)
         }

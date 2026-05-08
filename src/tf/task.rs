@@ -1,6 +1,6 @@
 use std::{any::Any, future::Future, pin::Pin, sync::Arc};
 
-use crate::tf::{errors::FlowError, traits::{AsyncTask, FromAnyIter, InvocableTask}};
+use crate::tf::{component_registry::FlowContext, errors::FlowError, traits::{AsyncTask, FromAnyIter, InvocableTask}};
 
 pub struct TaskInput<T = ()>(pub T);
 pub struct TaskOutput<T = ()>(pub T);
@@ -74,13 +74,21 @@ where
     I: FromAnyIter,
     O: Send + Sync + 'static
 {
-    fn invoke(self: Box<Self>, input: &mut dyn Iterator<Item = Arc<dyn Any + Send + Sync>>) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Any + Send + Sync>, FlowError>> + Send>> {
+    fn invoke(
+        self: Box<Self>,
+        ctx: Arc<FlowContext>,
+        input: &mut dyn Iterator<Item = Arc<dyn Any + Send + Sync>>,
+    ) -> Pin<Box<dyn Future<Output = Result<Arc<dyn Any + Send + Sync>, FlowError>> + Send>> {
         let input_tup = match I::from_any_iter(input) {
             Ok(v) => v,
             Err(e) => return Box::pin(async move { Err(e) }),
         };
         Box::pin(async move {
-            let TaskOutput(out) = self.task.run(TaskInput(input_tup)).await;
+            // `ctx: Arc<FlowContext>` is owned by this async block (moved in).
+            // The inner future returned by `self.task.run(&ctx, ...)` borrows
+            // `&*ctx`, but the borrow is awaited immediately and never escapes
+            // this block, so the outer future stays `'static + Send`.
+            let TaskOutput(out) = self.task.run(&ctx, TaskInput(input_tup)).await;
             Ok(Arc::new(out) as Arc<dyn Any + Send + Sync>)
         })
     }
@@ -124,7 +132,8 @@ mod test {
         let task_list: Vec<Box<dyn InvocableTask>> = vec![Box::new(add_typed_task), Box::new(multi_typed_task)];
         let a_input: Vec<Arc<dyn Any + Send + Sync>> = vec![Arc::new(100) as Arc<dyn Any + Send + Sync>, Arc::new(3000)];
         let mut task_list_iter = task_list.into_iter();
-        let a_fut = task_list_iter.next().unwrap().invoke(&mut a_input.into_iter());
+        let ctx = Arc::new(FlowContext::new());
+        let a_fut = task_list_iter.next().unwrap().invoke(ctx, &mut a_input.into_iter());
         let res = tokio::spawn(a_fut).await.unwrap().unwrap().downcast::<i32>();
         assert_eq!(*res.unwrap(), 3100i32)
     }

@@ -7,6 +7,7 @@ use std::{
 use serde::Serialize;
 
 use crate::tf::{
+    component_registry::{init_components, FlowContext},
     dependency::{DependencyBuilder, OutputWrapper},
     errors::{FlowError},
     task::TaskAdapter,
@@ -24,7 +25,16 @@ struct TaskMeta {
     pub(crate) name: String,
 }
 
+/// A DAG of tasks ready to be executed.
+///
+/// Each `Flow` owns an [`Arc<FlowContext>`] that is handed to every task
+/// invocation during [`Flow::execute`]. The default constructor [`Flow::new`]
+/// calls [`init_components`] to build the context from all components registered
+/// through `register_singleton!` / `register_factory!` at crate-compile time.
+/// For testing, mocking, or manual wiring, use [`Flow::with_context`] to inject
+/// a custom [`FlowContext`].
 pub struct Flow {
+    ctx: Arc<FlowContext>,
     tasks: Vec<Option<Box<dyn InvocableTask>>>,
     edges: HashMap<TaskId, Vec<TaskId>>,
     rev_edges: HashMap<TaskId, Vec<TaskId>>,
@@ -33,14 +43,33 @@ pub struct Flow {
 }
 
 impl Flow {
+    /// Creates a new `Flow` whose [`FlowContext`] is populated by scanning
+    /// every `register_singleton!` / `register_factory!` entry compiled into
+    /// this binary via [`init_components`].
     pub fn new() -> Self {
+        Self::with_context(Arc::new(init_components()))
+    }
+
+    /// Creates a `Flow` bound to a caller-supplied context. Useful when:
+    /// - swapping in a mocked `FlowContext` during tests,
+    /// - building a long-lived context once and sharing it across many flows,
+    /// - registering components dynamically rather than through inventory.
+    pub fn with_context(ctx: Arc<FlowContext>) -> Self {
         Self {
+            ctx,
             tasks: Vec::new(),
             edges: HashMap::new(),
             rev_edges: HashMap::new(),
             indegrees: HashMap::new(),
             task_metas: HashMap::new(),
         }
+    }
+
+    /// Access the [`FlowContext`] that this flow will feed into tasks at
+    /// execution time. Useful for test assertions or for pre-populating
+    /// request-scoped state before calling [`Flow::run`].
+    pub fn ctx(&self) -> &Arc<FlowContext> {
+        &self.ctx
     }
 
     pub fn commit_task<'flow, I, O>(
@@ -107,7 +136,7 @@ impl Flow {
                     let mut inputs_iter = inputs
                         .iter()
                         .filter_map(|v| outputs.get(v).cloned());
-                    let output = task.invoke(&mut inputs_iter).await.map_err(|e| e)?;
+                    let output = task.invoke(Arc::clone(&self.ctx), &mut inputs_iter).await.map_err(|e| e)?;
                     outputs.insert(task_id.clone(), output);
                 }
                 continue;
@@ -121,7 +150,7 @@ impl Flow {
                     let mut inputs_iter = inputs
                         .iter()
                         .filter_map(|v| outputs.get(v).cloned());
-                    let fut = task.invoke(&mut inputs_iter);
+                    let fut = task.invoke(Arc::clone(&self.ctx), &mut inputs_iter);
                     handles.push((task_id.clone(), tokio::spawn(fut)));
                 }
             }
