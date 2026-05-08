@@ -1,11 +1,7 @@
-use figment::Error;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum FlowError {
-    #[error("configuration error: {0}")]
-    ConfigError(#[from] Error),
-
     #[error("flow has cycle")]
     HasCycle,
 

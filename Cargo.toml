@@ -10,7 +10,6 @@ tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.18"
-figment = { version = "0.10.19", features = ["toml", "json", "env"] }
 inventory = "0.3.24"
 taskflow-macros = { path = "taskflow-macros", version = "0.1.0" }
 taskflow-build = { path = "taskflow-build", version = "0.1.0" }
@@ -33,6 +32,5 @@ inventory = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-figment = { workspace = true }
 
 
