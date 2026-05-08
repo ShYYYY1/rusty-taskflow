@@ -72,6 +72,20 @@ impl Flow {
         &self.ctx
     }
 
+    /// Registers a processor/sink task into the DAG and returns a
+    /// [`DependencyBuilder`] so the caller can wire its upstream dependencies
+    /// via `.with_dependencies(...)`.
+    ///
+    /// The task's [`Input`](AsyncTask::Input) must implement [`FromAnyIter`],
+    /// which the runtime uses to reconstruct a typed tuple from the upstream
+    /// `Arc<dyn Any>` outputs at execution time.
+    ///
+    /// `name` is recorded in `TaskMeta` for diagnostics; it does not need to
+    /// be unique.
+    ///
+    /// Accepts either `#[sync_task]` or `#[async_task]` implementers — both
+    /// satisfy [`AsyncTask`] via the blanket impl in
+    /// [`crate::tf::traits`].
     pub fn commit_task<'flow, I, O>(
         &'flow mut self,
         name: impl Into<String>,
@@ -90,6 +104,14 @@ impl Flow {
         DependencyBuilder::new(task_id, self)
     }
 
+    /// Registers a source task (zero upstream dependencies) and returns the
+    /// [`OutputWrapper`] of its output, which can be fed directly into
+    /// downstream `commit_task(...).with_dependencies(...)` calls.
+    ///
+    /// Source tasks take no DAG input, so their `run` signature should be
+    /// `fn run(self) -> O` (or with a leading `ctx: &FlowContext`). The input
+    /// type is fixed to the zero-sized `()`-like marker produced by
+    /// [`FromAnyIter`].
     pub fn commit_source_task<'flow, I, O>(
         &'flow mut self,
         name: impl Into<String>,
@@ -172,6 +194,20 @@ impl Flow {
         Ok(outputs)
     }
 
+    /// Executes the DAG layer-by-layer and returns the typed output of the
+    /// designated sink task.
+    ///
+    /// The `sink` argument is the [`OutputWrapper`] produced when the sink
+    /// task was committed; its type parameter statically guarantees the
+    /// returned type matches.
+    ///
+    /// # Errors
+    /// - [`FlowError::HasCycle`] if the graph is not a DAG.
+    /// - [`FlowError::TaskNotFound`] if the sink produced no output (should
+    ///   not happen for a correctly-wired graph).
+    /// - [`FlowError::TaskExecutionError`] if downcast fails (type mismatch),
+    ///   if the output `Arc` has other live owners and cannot be unwrapped,
+    ///   or if any task panicked / returned an error during execution.
     pub async fn run<Output: Send + Sync + 'static>(
         &mut self,
         sink: OutputWrapper<Output>,
@@ -194,6 +230,17 @@ impl Flow {
         })
     }
 
+    /// Executes the DAG and returns the sink's output as a type-erased
+    /// `Arc<dyn Any + Send + Sync>`.
+    ///
+    /// This is the entry point used by code generated from TOML flow
+    /// definitions, where the sink type is not known at the call site. The
+    /// caller is expected to downcast the result to the concrete type. For
+    /// statically-typed manual graphs, prefer [`Flow::run`].
+    ///
+    /// # Errors
+    /// Same failure modes as [`Flow::run`], except the type-mismatch / unwrap
+    /// branches are skipped because no downcast is performed here.
     pub async fn run_with_sink_id(
         &mut self,
         sink_id: TaskId,
