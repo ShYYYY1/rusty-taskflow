@@ -15,7 +15,7 @@ taskflow-macros = { path = "taskflow-macros", version = "0.1.0" }
 taskflow-build = { path = "taskflow-build", version = "0.1.0" }
 
 [package]
-name = "taskflow"
+name = "rusty-taskflow"
 version = "0.1.0"
 edition = "2024"
 description = "A type-safe async DAG task flow framework"

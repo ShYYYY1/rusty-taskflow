@@ -17,7 +17,7 @@
 //!   `Box<T>`.
 //!
 //! ```ignore
-//! use taskflow::{register_singleton, register_factory};
+//! use rusty_taskflow::{register_singleton, register_factory};
 //!
 //! pub struct Db { /* ... */ }
 //! impl Db { pub fn new() -> Self { Db {} } }

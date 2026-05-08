@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use taskflow::{async_task, register_factory, register_singleton, sync_task, FlowContext};
+use rusty_taskflow::{async_task, register_factory, register_singleton, sync_task, FlowContext};
 
 /// A singleton that lives inside the `FlowContext` and exposes a tunable
 /// multiplier that downstream tasks can read without having to receive it
@@ -39,7 +39,7 @@ impl FibSource1 {
     }
 }
 
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl FibSource1 {
     fn run(self) ->u64 {
         10
@@ -54,7 +54,7 @@ impl FibSource2 {
     }
 }
 
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl FibSource2 {
     fn run(self) ->u64 {
         10
@@ -69,7 +69,7 @@ impl Merger {
     }
 }
 
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl Merger {
     fn run(self, v1: &u64, v2: &u64) ->u64 {
         println!("Merger output: {}", v1 + v2);
@@ -78,7 +78,7 @@ impl Merger {
 }
 
 pub struct Fib;
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl Fib {
     pub fn new() -> Self {
         Self
@@ -112,7 +112,7 @@ impl Multiply {
     }
 }
 
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl Multiply {
     fn run(self, ctx: &FlowContext, v: &u64) -> u64 {
         let cfg = ctx
@@ -132,7 +132,7 @@ impl Multiply {
 
 pub struct FibInput;
 
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl FibInput {
     pub fn new() -> Self {
         Self
@@ -145,7 +145,7 @@ impl FibInput {
 
 pub struct AsyncPersistFib;
 
-#[async_task(path = "::taskflow")]
+#[async_task(path = "::rusty_taskflow")]
 impl AsyncPersistFib {
     pub fn new() -> Self {
         Self
@@ -169,7 +169,7 @@ impl AsyncPersistFib {
 
 pub struct DoubleSink;
 
-#[sync_task(path = "::taskflow")]
+#[sync_task(path = "::rusty_taskflow")]
 impl DoubleSink {
     pub fn new() -> Self {
         Self

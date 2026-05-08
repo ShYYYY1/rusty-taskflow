@@ -9,7 +9,7 @@ name = "tf-examples"
 path = "src/main.rs"
 
 [dependencies]
-taskflow = { path = ".." }
+rusty-taskflow = { path = ".." }
 tokio = { workspace = true }
 
 [build-dependencies]

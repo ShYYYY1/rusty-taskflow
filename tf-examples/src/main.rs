@@ -2,7 +2,7 @@ mod config_tasks;
 
 use std::sync::Arc;
 
-use taskflow::{tf::flow::Flow, FlowContext};
+use rusty_taskflow::{tf::flow::Flow, FlowContext};
 
 // add generated .rs to compile
 include!(concat!(env!("OUT_DIR"), "/generated_typed_flows.rs"));
