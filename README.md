@@ -25,6 +25,10 @@ A high-performance, type-safe DAG (Directed Acyclic Graph) execution framework f
   - Direct execution by path
   - Construct flow manually in Rust code via `Flow::new()` / `Flow::with_context()`
 
+### Limitations
+
+- **Max 7 DAG inputs per task**: A task's `run` method currently accepts at most 7 upstream-dependency parameters (the optional leading `ctx: &FlowContext` does not count toward this limit). The cap comes from the tuple arities for which [`FromAnyIter`] is implemented in `src/tf/traits.rs` (tuples up to 7 elements). If you need more inputs, either bundle several upstream outputs into a single struct in an intermediate task, or extend the `FromAnyIter` impls to higher arities.
+
 ### Performance
 
 **Zero-overhead abstraction** — Framework overhead is minimal compared to hand-written tokio baseline code.
